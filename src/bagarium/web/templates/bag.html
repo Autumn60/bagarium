@@ -62,6 +62,23 @@
   </form>
 </section>
 
+{% if track_topics and not bag.missing %}
+<section>
+  <div class="section-head">
+    <h2>Track</h2>
+    <div class="actions">
+      {% if track_topics | length > 1 %}
+      <select id="track-topic">
+        {% for t in track_topics %}<option value="{{ t.name }}">{{ t.name }} ({{ t.type.split("/")[-1] }})</option>{% endfor %}
+      </select>
+      {% else %}<span class="muted">{{ track_topics[0].name }}</span>{% endif %}
+    </div>
+  </div>
+  <div id="map" class="map"></div>
+  <p class="muted hint" id="map-status">loading track…</p>
+</section>
+{% endif %}
+
 {% set can_extract = not bag.missing and not bag.error and topics %}
 <section>
   <div class="section-head">
@@ -120,4 +137,46 @@
 </script>
 <script src="/static/topic-select.js"></script>
 <script src="/static/jobs.js"></script>
+{% if track_topics and not bag.missing %}
+{% include "_leaflet.html" %}
+<script>
+  (() => {
+    const M = window.bagariumMap;
+    const map = M.createMap(document.getElementById("map"));
+    const status = document.getElementById("map-status");
+    const select = document.getElementById("track-topic");
+    const form = document.getElementById("extract-form");
+    let layer = null;
+    window.bagariumUseTime = (field, value) => {
+      const input = form && form.querySelector(`input[name=${field}]`);
+      if (!input) return;
+      input.value = value;
+      input.scrollIntoView({ behavior: "smooth", block: "center" });
+      map.closePopup();
+    };
+    const popup = (p, t) => {
+      const sec = p[2].toFixed(1);
+      return `<strong>+${sec} s</strong> · ${M.clock(t.start_ns, p[2])}` + (form
+        ? `<div class="popup-actions"><button onclick="bagariumUseTime('start', '${sec}')">Use as start</button>`
+          + `<button onclick="bagariumUseTime('end', '${sec}')">Use as end</button></div>` : "");
+    };
+    const load = async () => {
+      status.textContent = "loading track… (the first time can take a few seconds for large bags)";
+      try {
+        const t = await M.fetchTrack({{ bag.id }}, select ? select.value : "");
+        if (layer) layer.remove();
+        layer = M.drawTrack(map, t, { popup });
+        if (t.points.length) map.fitBounds(layer.getBounds(), { padding: [20, 20] });
+        status.textContent = t.points.length
+          ? `${t.points.length} points from ${t.topic} · click the track for the time at that spot`
+          : `no valid positions on ${t.topic}`;
+      } catch (e) {
+        status.textContent = e.message;
+      }
+    };
+    select?.addEventListener("change", load);
+    load();
+  })();
+</script>
+{% endif %}
 {% endblock %}

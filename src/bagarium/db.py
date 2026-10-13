@@ -45,6 +45,14 @@ CREATE TABLE IF NOT EXISTS roots (
     last_scanned_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS tracks (
+    bag_id INTEGER NOT NULL REFERENCES bags(id) ON DELETE CASCADE,
+    topic  TEXT    NOT NULL,
+    mtime  REAL    NOT NULL,  -- bag mtime the track was computed for
+    points TEXT    NOT NULL,  -- JSON [[lat, lon, seconds since bag start], ...]
+    PRIMARY KEY (bag_id, topic)
+);
+
 CREATE TABLE IF NOT EXISTS bag_tags (
     bag_id INTEGER NOT NULL REFERENCES bags(id) ON DELETE CASCADE,
     tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,

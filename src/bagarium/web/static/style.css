@@ -121,3 +121,12 @@ div.extract label.wide input[type=text] { flex: 1; }
 .state-failed { color: var(--err); }
 
 .search select { max-width: 320px; text-overflow: ellipsis; }
+
+.map { height: 420px; border: 1px solid var(--border); border-radius: 8px; z-index: 0; }
+.map.tall { height: 65vh; min-height: 360px; }
+.leaflet-container { font: inherit; }
+.popup-actions { display: flex; gap: 6px; margin-top: 6px; }
+.popup-actions button { padding: 2px 8px; font-size: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; }
+.legend label { display: flex; align-items: center; gap: 6px; }
+.swatch { display: inline-block; width: 14px; height: 4px; border-radius: 2px; background: var(--muted); }

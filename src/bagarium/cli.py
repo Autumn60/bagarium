@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from . import __version__, catalog, db, extract, fileops, fmt, importer, move
+from . import __version__, catalog, db, extract, fileops, fmt, importer, move, track
 
 
 class Ctx:
@@ -436,6 +436,40 @@ def import_cmd(c: Ctx, src: Path, dest: Path, dry_run: bool, include, exclude, n
     click.echo(f"imported {counts['done']}, skipped {counts['skipped']}, failed {counts['failed']}")
     if counts["failed"]:
         raise SystemExit(1)
+
+
+@main.command(name="track")
+@click.argument("bags", nargs=-1, required=True)
+@click.option("--topic", help="Position topic (default: the best supported one in each bag).")
+@click.option("--format", "fmt_", type=click.Choice(["geojson", "csv"]), default="geojson", show_default=True)
+@pass_ctx
+def track_cmd(c: Ctx, bags: tuple[str, ...], topic: str | None, fmt_: str) -> None:
+    """Print the driving track (latitude / longitude) of BAGS as GeoJSON or CSV.
+
+    Read from VehicleKinematics, NavSatFix or GeoPoint/GeoPoseStamped topics;
+    points are thinned out to about 0.5 m spacing.
+    """
+    features = []
+    if fmt_ == "csv":
+        click.echo("bag,topic,offset_s,time,latitude,longitude")
+    for ref in bags:
+        r = c.bag(ref)
+        try:
+            t = track.get_track(c.conn, r, topic)
+        except Exception as e:
+            click.secho(f"error: {r['path']}: {type(e).__name__}: {e}", fg="red", err=True)
+            continue
+        if t is None:
+            click.secho(f"skipped: {r['path']}: no supported position topic", fg="yellow", err=True)
+            continue
+        if fmt_ == "csv":
+            for lat, lon, off in t.points:
+                ts = fmt.time(r["start_ns"] + round(off * 1e9)) if r["start_ns"] is not None else ""
+                click.echo(f"{r['path']},{t.topic},{off},{ts},{lat},{lon}")
+        else:
+            features.append(track.to_geojson(t, r))
+    if fmt_ == "geojson":
+        click.echo(json.dumps({"type": "FeatureCollection", "features": features}, ensure_ascii=False))
 
 
 @main.command()

@@ -19,7 +19,8 @@ from typing import Callable, Iterable
 
 import yaml
 
-from . import __version__, catalog, scanner
+from . import __version__, bagreader, catalog, scanner
+from .bagreader import TopicMeta
 
 ProgressCallback = Callable[[float, int], None]
 PROGRESS_EVERY = 2000
@@ -31,14 +32,6 @@ CREATE TABLE topics(id INTEGER PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NU
                     serialization_format TEXT NOT NULL, offered_qos_profiles TEXT NOT NULL);
 CREATE TABLE messages(id INTEGER PRIMARY KEY, topic_id INTEGER NOT NULL, timestamp INTEGER NOT NULL, data BLOB NOT NULL);
 """
-
-
-@dataclass
-class TopicMeta:
-    name: str
-    type: str
-    serialization_format: str = "cdr"
-    offered_qos_profiles: str = ""
 
 
 @dataclass
@@ -98,53 +91,6 @@ def default_output_path(src: Path, output_dir: Path | None = None, suffix: str |
     return (Path(output_dir) if output_dir else src.parent) / f"{stem}_{suffix or default_suffix()}"
 
 
-# ---------------------------------------------------------------- input layout
-
-
-@dataclass
-class _Layout:
-    storage: str
-    files: list[Path]
-    file_compressed: bool = False
-    message_compressed: bool = False
-    topics: dict[str, TopicMeta] = field(default_factory=dict)  # from metadata.yaml, if any
-
-
-def _layout(src: Path) -> _Layout:
-    if src.is_file():
-        return _Layout(scanner.storage_of(src), [src])
-    with open(src / scanner.METADATA_FILE, encoding="utf-8") as f:
-        meta = (yaml.safe_load(f) or {})["rosbag2_bagfile_information"]
-    fmt = meta.get("compression_format") or ""
-    mode = (meta.get("compression_mode") or "").upper()
-    if fmt and fmt != "zstd":
-        raise ValueError(f"unsupported compression format: {fmt}")
-    topics = {}
-    for entry in meta.get("topics_with_message_count") or []:
-        tm = entry.get("topic_metadata") or {}
-        qos = tm.get("offered_qos_profiles", "")
-        topics[tm.get("name", "")] = TopicMeta(
-            tm.get("name", ""), tm.get("type", ""), tm.get("serialization_format", "cdr"),
-            qos if isinstance(qos, str) else yaml.safe_dump(qos),
-        )
-    return _Layout(
-        storage=meta.get("storage_identifier") or "unknown",
-        files=[src / p for p in meta.get("relative_file_paths") or []],
-        file_compressed=bool(fmt) and mode == "FILE",
-        message_compressed=bool(fmt) and mode == "MESSAGE",
-        topics=topics,
-    )
-
-
-def _decompress_file(src: Path, dest_dir: Path) -> Path:
-    import zstandard
-
-    dest = dest_dir / src.name.removesuffix(".zstd")
-    with open(src, "rb") as fi, open(dest, "wb") as fo:
-        zstandard.ZstdDecompressor().copy_stream(fi, fo)
-    return dest
-
-
 # ---------------------------------------------------------------- extract
 
 
@@ -171,7 +117,7 @@ def extract(
     if start_ns is not None and end_ns is not None and start_ns > end_ns:
         raise ValueError("start is after end")
 
-    layout = _layout(src)
+    layout = bagreader.layout(src)
     if layout.storage not in ("sqlite3", "mcap"):
         raise ValueError(f"unsupported storage: {layout.storage}")
     if bounds is None:
@@ -194,7 +140,7 @@ def extract(
     # the output) and move the finished bag into place at the end.
     with tempfile.TemporaryDirectory(prefix=".bagarium-extract-", dir=out.parent) as tmp:
         tmp = Path(tmp)
-        files = [_decompress_file(f, tmp) for f in layout.files] if layout.file_compressed else layout.files
+        files = [bagreader.decompress_file(f, tmp) for f in layout.files] if layout.file_compressed else layout.files
         stage = tmp / out.name
         stage.mkdir()
         ext = "db3" if layout.storage == "sqlite3" else "mcap"

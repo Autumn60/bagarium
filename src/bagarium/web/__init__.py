@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .. import __version__, catalog, db, extract, fileops, fmt, importer, move
+from .. import __version__, catalog, db, extract, fileops, fmt, importer, move, track
 from .jobs import MAX_ERRORS, Job, JobQueue
 
 HERE = Path(__file__).parent
@@ -104,6 +104,27 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             "total_size": sum(r["size_bytes"] for r in rows),
         })
 
+    @app.get("/map", response_class=HTMLResponse)
+    def map_page(
+        request: Request,
+        q: str = "",
+        tag: list[str] = Query(default=[]),
+        topic: str = "",
+        type: str = "",
+        since: str = "",
+        until: str = "",
+        root: str = "",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        tag = [t for t in tag if t]
+        rows, errors = run_search(conn, q, tag, topic, type, since, until, False, root)
+        with_track = [r for r in rows if track.candidates(catalog.topics_of(conn, r["id"]))]
+        params = {"q": q, "tag": tag, "topic": topic, "type": type, "since": since, "until": until, "root": root}
+        return templates.TemplateResponse(request, "map.html", {
+            "bags": with_track, "total": len(rows), "errors": errors,
+            "list_url": "/?" + urlencode({k: v for k, v in params.items() if v}, doseq=True),
+        })
+
     @app.get("/bags/{bag_id}", response_class=HTMLResponse)
     def bag_detail(request: Request, bag_id: int, error: str = "", conn: sqlite3.Connection = Depends(get_conn)):
         bag = load_bag(conn, bag_id)
@@ -116,6 +137,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             "roots": catalog.list_roots(conn),
             "error": error,
             "default_output": extract.default_output_path(Path(bag["path"])),
+            "track_topics": track.candidates(catalog.topics_of(conn, bag_id)),
         })
 
     @app.post("/bags/{bag_id}/note", dependencies=[Depends(same_origin)])
@@ -515,6 +537,23 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             raise HTTPException(400, "; ".join(errors))
         tag_map = catalog.tags_of(conn, (r["id"] for r in rows))
         return [{**dict(r), "missing": bool(r["missing"]), "tags": tag_map[r["id"]]} for r in rows]
+
+    @app.get("/api/bags/{bag_id}/track")
+    def api_track(bag_id: int, topic: str = "", conn: sqlite3.Connection = Depends(get_conn)):
+        bag = load_bag(conn, bag_id)
+        options = track.candidates(catalog.topics_of(conn, bag_id))
+        if not options:
+            raise HTTPException(404, "this bag has no supported position topic")
+        if bag["missing"]:
+            raise HTTPException(409, "bag files not found")
+        try:
+            t = track.get_track(conn, bag, topic or None)
+        except Exception as e:  # unreadable data: report instead of a 500 page
+            raise HTTPException(422, f"could not read the track: {type(e).__name__}: {e}")
+        if t is None:
+            raise HTTPException(404, f"no such position topic: {topic}")
+        return {**t.to_dict(), "bag_id": bag_id, "name": bag["name"], "start_ns": bag["start_ns"],
+                "candidates": options}
 
     @app.get("/api/bags/{bag_id}")
     def api_bag(bag_id: int, conn: sqlite3.Connection = Depends(get_conn)):

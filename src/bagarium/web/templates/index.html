@@ -37,7 +37,8 @@
 {% endif %}
 
 <form method="get" action="/extract" id="bulk-form" class="bulk">
-  <p class="summary">{{ bags | length }} bags · {{ total_size | size }}</p>
+  <p class="summary">{{ bags | length }} bags · {{ total_size | size }} ·
+    <a href="/map?{{ request.url.query }}">show on map</a></p>
   {% if bags %}
   <span class="muted"><span id="bulk-count">0</span> selected</span>
   <button type="submit" id="bulk-extract" disabled>Extract selected…</button>

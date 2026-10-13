@@ -70,6 +70,10 @@ bagarium import -n /media/me/SSD/rosbags ~/rosbags/ssd    # dry run
 bagarium import /media/me/SSD/rosbags ~/rosbags/ssd
 bagarium import /media/me/SSD/rosbags ~/rosbags/ssd -i '2026-09-*/*' -x '*/derivatives/*'   # pick bags
 
+# Driving track (latitude / longitude) as GeoJSON or CSV
+bagarium track 12 > run.geojson
+bagarium track --format csv --topic /sensing/gnss/fix 12
+
 # Web UI (http://127.0.0.1:8000/)
 bagarium serve
 ```
@@ -127,14 +131,25 @@ bagarium serve
 - The destination is registered as a root, imported bags are added to the catalog, and tags/notes of
   sources that were already catalogued are carried over.
 
+### Tracks
+
+- Read without ROS from `autoware_adapi_v1_msgs/msg/VehicleKinematics` (its `geographic_pose`),
+  `sensor_msgs/msg/NavSatFix` (messages without a fix are dropped) and
+  `geographic_msgs/msg/GeoPointStamped` / `GeoPoseStamped`, preferring them in that order.
+- Points are thinned to about 0.5 m spacing (at most 5000 per bag) and cached in the catalog; the
+  cache is rebuilt when the bag changes. The first read of a large bag can take several seconds.
+- Map tiles (OpenStreetMap, GSI 地理院タイル standard / aerial photo) are loaded from the internet.
+
 ### Catalog database location
 
 Defaults to `~/.local/share/bagarium/bagarium.db`. Override with `--db PATH` or the `BAGARIUM_DB` environment variable.
 
 ## Web UI
 
-- List: search by keyword, topic, message type, date and registered folder (dropdown); click tags to filter; select bags to extract from or move
-- Detail: metadata, topic list (filterable, with message counts and average rates), tag and note editing,
+- List: search by keyword, topic, message type, date and registered folder (dropdown); click tags to filter;
+  "show on map" draws the tracks of the listed bags on one map; select bags to extract from or move
+- Detail: metadata, driving track on a map (click it for the time at that spot and use it as the
+  extraction start / end), topic list (filterable, with message counts and average rates), tag and note editing,
   and extraction (pick topics and a time range; runs in the background)
 - Extract: batch extraction from the selected bags, with topics shown across all of them
 - Move: move the selected bags (or one bag from its page) to a folder
@@ -144,7 +159,7 @@ Defaults to `~/.local/share/bagarium/bagarium.db`. Override with `--db PATH` or 
   and finished jobs with per-bag results. Outputs of queued extractions are reserved, so jobs queued
   with the same names do not collide. The queue lives in the server process and is lost on restart.
 - Scan: register / remove folders and scan them in the background with a progress bar (cancellable)
-- JSON API: `/api/bags`, `/api/bags/{id}`, `/api/jobs`, `/api/jobs/{id}` (spec at `/api/docs`)
+- JSON API: `/api/bags`, `/api/bags/{id}`, `/api/bags/{id}/track`, `/api/jobs`, `/api/jobs/{id}` (spec at `/api/docs`)
 
 The server listens on `127.0.0.1` only by default. There is no authentication, so be careful when exposing it with `--host 0.0.0.0`.
 

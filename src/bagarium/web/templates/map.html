@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Map · bagarium{% endblock %}
+{% block content %}
+<p><a href="{{ list_url }}">← back to the list</a></p>
+<h1>Map <span class="muted">({{ bags | length }} of {{ total }} bags have a position topic)</span></h1>
+{% for e in errors %}<p class="error">{{ e }}</p>{% endfor %}
+
+{% if bags %}
+<div id="map" class="map tall"></div>
+<p class="muted" id="map-status">loading tracks…</p>
+<div class="legend" id="legend">
+  {% for b in bags %}
+    <label data-bag="{{ b.id }}"><input type="checkbox" checked>
+      <span class="swatch"></span><a href="/bags/{{ b.id }}">{{ b.name }}</a>
+      <span class="muted">{{ b.start_ns | time }}</span> <span class="muted state"></span></label>
+  {% endfor %}
+</div>
+{% include "_leaflet.html" %}
+<script>
+  (async () => {
+    const M = window.bagariumMap;
+    const map = M.createMap(document.getElementById("map"));
+    const bags = {{ bags | map(attribute="id") | list | tojson }};
+    const names = {{ bags | map(attribute="name") | list | tojson }};
+    const status = document.getElementById("map-status");
+    const layers = {}, bounds = L.latLngBounds([]);
+    let done = 0;
+    const load = async (id, i) => {
+      const label = document.querySelector(`#legend [data-bag="${id}"]`);
+      const color = M.COLORS[i % M.COLORS.length];
+      label.querySelector(".swatch").style.background = color;
+      try {
+        const t = await M.fetchTrack(id);
+        layers[id] = M.drawTrack(map, t, { color, popup: (p, tr) =>
+          `<a href="/bags/${id}">${names[i]}</a><br>+${p[2].toFixed(1)} s · ${M.clock(tr.start_ns, p[2])}` });
+        if (t.points.length) { bounds.extend(layers[id].getBounds()); map.fitBounds(bounds, { padding: [20, 20] }); }
+        label.querySelector(".state").textContent = `${t.points.length} points`;
+      } catch (e) {
+        label.querySelector(".state").textContent = e.message;
+      }
+      status.textContent = ++done < bags.length ? `loading tracks… ${done} / ${bags.length}` : "";
+      label.querySelector("input").addEventListener("change", ev => {
+        if (!layers[id]) return;
+        ev.target.checked ? layers[id].addTo(map) : layers[id].remove();
+      });
+    };
+    // a few at a time: reading a track for the first time can take a while
+    const queue = bags.map((id, i) => [id, i]);
+    await Promise.all([0, 1, 2].map(async () => { while (queue.length) await load(...queue.shift()); }));
+  })();
+</script>
+{% else %}
+<p class="empty">None of these bags has a supported position topic
+  (VehicleKinematics, NavSatFix, GeoPointStamped / GeoPoseStamped).</p>
+{% endif %}
+{% endblock %}
