@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Tags · bagarium{% endblock %}
+{% block content %}
+<h1>Tags</h1>
+{% if all_tags %}
+<div class="tagbar large">
+  {% for t in all_tags %}
+    <a class="tag" href="/?tag={{ t.name | urlencode }}">{{ t.name }} <span class="muted">{{ t.count }}</span></a>
+  {% endfor %}
+</div>
+{% else %}
+<p class="empty">No tags yet. Add them from a bag page or with <code>bagarium tag &lt;bag&gt; &lt;tag&gt;</code>.</p>
+{% endif %}
+{% endblock %}

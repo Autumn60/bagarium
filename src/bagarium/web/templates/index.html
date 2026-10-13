@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+<form class="search" method="get" action="/">
+  <input type="search" name="q" value="{{ params.q }}" placeholder="name, path, note..." autofocus>
+  <input type="text" name="topic" value="{{ params.topic }}" placeholder="topic (e.g. /camera/*)">
+  <input type="text" name="type" value="{{ params.type }}" placeholder="msg type (e.g. PointCloud2)">
+  <label>from <input type="date" name="since" value="{{ params.since }}"></label>
+  <label>to <input type="date" name="until" value="{{ params.until }}"></label>
+  <label class="check"><input type="checkbox" name="missing" value="true" {% if params.missing %}checked{% endif %}> missing</label>
+  {% for t in params.tag %}<input type="hidden" name="tag" value="{{ t }}">{% endfor %}
+  <button type="submit">Search</button>
+  <a class="reset" href="/">Reset</a>
+</form>
+
+{% for e in errors %}<p class="error">{{ e }}</p>{% endfor %}
+
+{% if all_tags %}
+<div class="tagbar">
+  {% for t in all_tags %}
+    {% if t.name in params.tag %}
+      <a class="tag active" href="{{ with_tags(params.tag | reject('equalto', t.name) | list) }}">{{ t.name }} ×</a>
+    {% else %}
+      <a class="tag" href="{{ with_tags(params.tag + [t.name]) }}">{{ t.name }} <span class="muted">{{ t.count }}</span></a>
+    {% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+
+<p class="summary">{{ bags | length }} bags · {{ total_size | size }}</p>
+
+{% if bags %}
+<div class="table-wrap">
+<table class="bags">
+  <thead>
+    <tr><th>Start</th><th>Name</th><th class="num">Duration</th><th class="num">Size</th><th class="num">Msgs</th><th>Storage</th><th>Tags</th></tr>
+  </thead>
+  <tbody>
+  {% for b in bags %}
+    <tr class="{% if b.missing %}missing{% endif %}">
+      <td class="nowrap">{{ b.start_ns | time }}</td>
+      <td>
+        <a href="/bags/{{ b.id }}">{{ b.name }}</a>
+        {% if b.missing %}<span class="badge warn">missing</span>{% endif %}
+        {% if b.error %}<span class="badge err" title="{{ b.error }}">error</span>{% endif %}
+        {% if b.note %}<div class="note-preview">{{ b.note | truncate(80) }}</div>{% endif %}
+      </td>
+      <td class="num">{{ duration(b.start_ns, b.end_ns) }}</td>
+      <td class="num">{{ b.size_bytes | size }}</td>
+      <td class="num">{{ b.message_count | count }}</td>
+      <td>{{ b.storage }}</td>
+      <td>{% for t in tag_map[b.id] %}<a class="tag small" href="{{ with_tags([t]) }}">{{ t }}</a>{% endfor %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p class="empty">No bags found. Index some with <code>bagarium scan &lt;dir&gt;</code>.</p>
+{% endif %}
+{% endblock %}

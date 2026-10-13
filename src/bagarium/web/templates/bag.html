@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}{{ bag.name }} · bagarium{% endblock %}
+{% block content %}
+<p><a href="/">← all bags</a></p>
+<h1>{{ bag.name }}
+  {% if bag.missing %}<span class="badge warn">missing</span>{% endif %}
+  {% if bag.error %}<span class="badge err">error</span>{% endif %}
+</h1>
+
+<dl class="meta">
+  <dt>Path</dt><dd><code class="path">{{ bag.path }}</code> <button type="button" class="copy" data-copy="{{ bag.path }}">copy</button></dd>
+  <dt>Storage</dt><dd>{{ bag.storage }}</dd>
+  <dt>Start</dt><dd>{{ bag.start_ns | time }}</dd>
+  <dt>End</dt><dd>{{ bag.end_ns | time }}</dd>
+  <dt>Duration</dt><dd>{{ duration(bag.start_ns, bag.end_ns) }}</dd>
+  <dt>Size</dt><dd>{{ bag.size_bytes | size }}</dd>
+  <dt>Messages</dt><dd>{{ bag.message_count | count }}</dd>
+  <dt>Indexed</dt><dd>{{ bag.indexed_at }}</dd>
+  {% if bag.error %}<dt>Error</dt><dd class="error">{{ bag.error }}</dd>{% endif %}
+</dl>
+
+<section>
+  <h2>Tags</h2>
+  <div class="tagbar">
+    {% for t in tags %}
+      <form method="post" action="/bags/{{ bag.id }}/tags/remove" class="inline">
+        <input type="hidden" name="tag" value="{{ t }}">
+        <a class="tag" href="/?tag={{ t | urlencode }}">{{ t }}</a><button class="tag-remove" title="remove">×</button>
+      </form>
+    {% else %}
+      <span class="muted">no tags</span>
+    {% endfor %}
+  </div>
+  <form method="post" action="/bags/{{ bag.id }}/tags" class="row">
+    <input type="text" name="tags" list="known-tags" placeholder="add tags (comma separated)">
+    <datalist id="known-tags">{% for t in all_tags %}<option value="{{ t.name }}">{% endfor %}</datalist>
+    <button type="submit">Add</button>
+  </form>
+</section>
+
+<section>
+  <h2>Note</h2>
+  <form method="post" action="/bags/{{ bag.id }}/note">
+    <textarea name="note" rows="5" placeholder="what was recorded, conditions, issues...">{{ bag.note }}</textarea>
+    <button type="submit">Save note</button>
+  </form>
+</section>
+
+<section>
+  <h2>Topics <span class="muted">({{ topics | length }})</span></h2>
+  <div class="table-wrap">
+  <table class="topics">
+    <thead><tr><th>Topic</th><th>Type</th><th class="num">Messages</th><th class="num">Rate</th></tr></thead>
+    <tbody>
+    {% set secs = ((bag.end_ns or 0) - (bag.start_ns or 0)) / 1e9 %}
+    {% for t in topics %}
+      <tr>
+        <td><a href="/?topic={{ t.name | urlencode }}">{{ t.name }}</a></td>
+        <td><a href="/?type={{ t.type | urlencode }}">{{ t.type }}</a></td>
+        <td class="num">{{ t.message_count | count }}</td>
+        <td class="num">{% if secs > 0 %}{{ '%.1f' | format(t.message_count / secs) }} Hz{% else %}-{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<script>
+  document.querySelectorAll("button.copy").forEach(btn => btn.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(btn.dataset.copy); btn.textContent = "copied"; }
+    catch { btn.textContent = "copy failed"; }
+    setTimeout(() => btn.textContent = "copy", 1500);
+  }));
+</script>
+{% endblock %}

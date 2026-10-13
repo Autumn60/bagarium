@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bagarium"
+version = "0.1.0"
+description = "Local catalog for ROS 2 bags: scan, tag, annotate, search and browse."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "pyyaml>=6.0",
+    "mcap>=1.1",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+bagarium = "bagarium.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bagarium"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
