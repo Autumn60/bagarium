@@ -12,6 +12,8 @@ from typing import Iterator
 import yaml
 
 METADATA_FILE = "metadata.yaml"
+# libyaml's loader is >10x faster on the large metadata.yaml files of bags with many topics.
+YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 BAG_SUFFIXES = {".mcap": "mcap", ".db3": "sqlite3"}
 
 
@@ -105,7 +107,7 @@ def read_bag(path: Path) -> BagInfo:
 
 def _read_metadata_yaml(path: Path) -> BagInfo:
     with open(path / METADATA_FILE, encoding="utf-8") as f:
-        doc = yaml.safe_load(f) or {}
+        doc = yaml.load(f, Loader=YAML_LOADER) or {}
     meta = doc.get("rosbag2_bagfile_information")
     if not isinstance(meta, dict):
         raise ValueError(f"invalid {METADATA_FILE}: missing rosbag2_bagfile_information")

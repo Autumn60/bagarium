@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import os
 import sqlite3
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -30,12 +34,17 @@ def _now() -> str:
 
 ProgressCallback = Callable[[Path, str, int, int], None]
 
+COMMIT_EVERY = 50        # bags
+COMMIT_INTERVAL = 0.5    # seconds; keeps write transactions short for concurrent edits
+PARALLEL_MIN = 16        # read bags in worker processes when at least this many need reading
+
 
 def scan(
     conn: sqlite3.Connection,
     roots: Iterable[str | Path],
     force: bool = False,
     on_bag: ProgressCallback | None = None,
+    workers: int | None = None,
 ) -> ScanResult:
     """Index every bag under ``roots``.
 
@@ -43,10 +52,12 @@ def scan(
     Previously indexed bags under a root that no longer exist are flagged as
     missing; their tags and notes are kept so they survive a rescan.
 
-    ``on_bag(path, status, done, total)`` is called after each bag. Each bag is
-    committed on its own, so an exception raised from the callback aborts the
-    scan while keeping what was indexed so far (missing bags are then not
-    flagged, since the scan was incomplete).
+    Bags that need reading are read in ``workers`` processes (default: up to 8)
+    when there are many of them. Writes are committed in small batches.
+
+    ``on_bag(path, status, done, total)`` is called after each bag. An
+    exception raised from it aborts the scan while keeping what was indexed so
+    far (missing bags are then not flagged, since the scan was incomplete).
     """
     result = ScanResult()
     # (root, all bags under root, bags to index here: not already planned by an overlapping root)
@@ -64,20 +75,50 @@ def scan(
 
     total = sum(len(paths) for _, _, paths in plan)
     done = 0
-    for root, found, paths in plan:
-        for bag_path in paths:
-            status = _index_one(conn, bag_path, force, result)
-            conn.commit()
-            done += 1
-            if on_bag:
-                on_bag(bag_path, status, done, total)
-        result.missing += _mark_missing(conn, root, {str(p) for p in found})
-        conn.execute("UPDATE roots SET last_scanned_at = ? WHERE path = ?", (_now(), str(root)))
+    batch = _CommitBatcher(conn)
+
+    def report(path: Path, status: str) -> None:
+        nonlocal done
+        done += 1
+        batch.tick()
+        if on_bag:
+            on_bag(path, status, done, total)
+
+    try:
+        for root, found, paths in plan:
+            to_read = []
+            for bag_path in paths:
+                check = _check(conn, bag_path, force, result)
+                if isinstance(check, str):
+                    report(bag_path, check)
+                else:
+                    to_read.append(check)
+            for (bag_path, row, size, mtime), info, error in _read_all(to_read, workers):
+                report(bag_path, _store(conn, bag_path, row, size, mtime, info, error, result))
+            result.missing += _mark_missing(conn, root, {str(p) for p in found})
+            conn.execute("UPDATE roots SET last_scanned_at = ? WHERE path = ?", (_now(), str(root)))
+            batch.flush()
+    finally:
         conn.commit()
     return result
 
 
-def _index_one(conn: sqlite3.Connection, path: Path, force: bool, result: ScanResult) -> str:
+class _CommitBatcher:
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn, self.pending, self.last = conn, 0, time.monotonic()
+
+    def tick(self) -> None:
+        self.pending += 1
+        if self.pending >= COMMIT_EVERY or time.monotonic() - self.last >= COMMIT_INTERVAL:
+            self.flush()
+
+    def flush(self) -> None:
+        self.conn.commit()
+        self.pending, self.last = 0, time.monotonic()
+
+
+def _check(conn: sqlite3.Connection, path: Path, force: bool, result: ScanResult):
+    """Cheap pre-check: a status string when done ("unchanged" / "error"), else what to read."""
     row = conn.execute("SELECT id, size_bytes, mtime, missing, error FROM bags WHERE path = ?", (str(path),)).fetchone()
     try:
         size, mtime = scanner.stat_bag(path)
@@ -88,15 +129,37 @@ def _index_one(conn: sqlite3.Connection, path: Path, force: bool, result: ScanRe
             and row["size_bytes"] == size and row["mtime"] == mtime:
         result.unchanged += 1
         return "unchanged"
+    return path, row, size, mtime
 
+
+def _read_one(path: Path) -> tuple[scanner.BagInfo | None, str | None]:
     try:
-        info = scanner.read_bag(path)
-        error = None
+        return scanner.read_bag(path), None
     except Exception as e:  # corrupt or unsupported bags are still listed
-        info = scanner.BagInfo(path, scanner.storage_of(path), size, mtime)
-        error = f"{type(e).__name__}: {e}"
-        result.errors.append((path, error))
+        return None, f"{type(e).__name__}: {e}"
 
+
+def _read_all(items: list, workers: int | None):
+    """Yield ``(item, info, error)`` for each item, reading bags in parallel when there are many."""
+    workers = workers if workers is not None else min(8, os.cpu_count() or 1)
+    if workers <= 1 or len(items) < PARALLEL_MIN:
+        for item in items:
+            yield (item, *_read_one(item[0]))
+        return
+    # "spawn": forking a multi-threaded process (e.g. the web server) is unsafe.
+    pool = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
+    try:
+        futures = {pool.submit(_read_one, item[0]): item for item in items}
+        for future in as_completed(futures):
+            yield (futures[future], *future.result())
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _store(conn, path: Path, row, size: int, mtime: float, info, error, result: ScanResult) -> str:
+    if info is None:
+        info = scanner.BagInfo(path, scanner.storage_of(path), size, mtime)
+        result.errors.append((path, error))
     bag_id = row["id"] if row else None
     status = "updated" if row else "added"
     if bag_id is None and error is None:
@@ -140,10 +203,13 @@ def _upsert(conn: sqlite3.Connection, bag_id: int | None, info: scanner.BagInfo,
             " size_bytes = ?, mtime = ?, error = ?, indexed_at = ?, missing = 0 WHERE id = ?",
             (*values, bag_id),
         )
-        conn.execute("DELETE FROM topics WHERE bag_id = ?", (bag_id,))
+        conn.execute("DELETE FROM bag_topics WHERE bag_id = ?", (bag_id,))
+    pairs = [(t.name, t.type) for t in info.topics]
+    conn.executemany("INSERT OR IGNORE INTO topic_names (name, type) VALUES (?, ?)", pairs)
     conn.executemany(
-        "INSERT OR REPLACE INTO topics (bag_id, name, type, message_count) VALUES (?, ?, ?, ?)",
-        [(bag_id, t.name, t.type, t.message_count) for t in info.topics],
+        "INSERT OR REPLACE INTO bag_topics (bag_id, topic_id, message_count)"
+        " SELECT ?, id, ? FROM topic_names WHERE name = ? AND type = ?",
+        [(bag_id, t.message_count, t.name, t.type) for t in info.topics],
     )
     return bag_id
 
@@ -289,10 +355,12 @@ def search(
             "EXISTS (SELECT 1 FROM bag_tags bt JOIN tags t ON t.id = bt.tag_id WHERE bt.bag_id = b.id AND t.name = ?)"
         )
         params.append(tag)
-    for column, patterns in (("tp.name", topics), ("tp.type", types)):
+    for column, patterns in (("tn.name", topics), ("tn.type", types)):
         for pattern in patterns:
+            # match the (few) distinct topic names first, then the bags having them
             clause, value = _pattern_clause(column, pattern)
-            where.append(f"EXISTS (SELECT 1 FROM topics tp WHERE tp.bag_id = b.id AND {clause})")
+            where.append("b.id IN (SELECT bt.bag_id FROM bag_topics bt JOIN topic_names tn"
+                         f" ON tn.id = bt.topic_id WHERE {clause})")
             params.append(value)
     if root:
         root_s = str(Path(root).expanduser().resolve())

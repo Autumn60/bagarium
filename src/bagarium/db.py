@@ -24,14 +24,21 @@ CREATE TABLE IF NOT EXISTS bags (
 );
 CREATE INDEX IF NOT EXISTS idx_bags_start ON bags(start_ns);
 
-CREATE TABLE IF NOT EXISTS topics (
-    bag_id        INTEGER NOT NULL REFERENCES bags(id) ON DELETE CASCADE,
-    name          TEXT    NOT NULL,
-    type          TEXT    NOT NULL,
-    message_count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (bag_id, name, type)
+-- Topic names/types are shared by many bags, so they are stored once.
+CREATE TABLE IF NOT EXISTS topic_names (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,
+    UNIQUE (name, type)
 );
-CREATE INDEX IF NOT EXISTS idx_topics_name ON topics(name);
+
+CREATE TABLE IF NOT EXISTS bag_topics (
+    bag_id        INTEGER NOT NULL REFERENCES bags(id) ON DELETE CASCADE,
+    topic_id      INTEGER NOT NULL REFERENCES topic_names(id),
+    message_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bag_id, topic_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_bag_topics_topic ON bag_topics(topic_id);
 
 CREATE TABLE IF NOT EXISTS tags (
     id   INTEGER PRIMARY KEY,
@@ -79,5 +86,32 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    # Safe with WAL (no corruption); only the last commits may be lost on power failure.
+    conn.execute("PRAGMA synchronous = NORMAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
+    conn.executescript(VIEWS)
     return conn
+
+
+# Read-only view with the shape of the old `topics` table: (bag_id, name, type, message_count).
+VIEWS = """
+CREATE VIEW IF NOT EXISTS topics AS
+    SELECT bt.bag_id AS bag_id, tn.name AS name, tn.type AS type, bt.message_count AS message_count
+    FROM bag_topics bt JOIN topic_names tn ON tn.id = bt.topic_id;
+"""
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Move catalogs created before topic names were normalized to the new tables."""
+    row = conn.execute("SELECT type FROM sqlite_master WHERE name = 'topics'").fetchone()
+    if row is None or row["type"] != "table":
+        return
+    with conn:
+        conn.execute("INSERT OR IGNORE INTO topic_names (name, type) SELECT DISTINCT name, type FROM topics")
+        conn.execute(
+            "INSERT OR REPLACE INTO bag_topics (bag_id, topic_id, message_count)"
+            " SELECT t.bag_id, n.id, t.message_count FROM topics t JOIN topic_names n USING (name, type)"
+        )
+        conn.execute("DROP TABLE topics")
+    conn.execute("VACUUM")

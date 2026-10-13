@@ -142,3 +142,53 @@ def test_search_by_root(conn, bag_root, tmp_path):
     assert names(catalog.search(conn, root=sibling)) == ["other.mcap"]
     assert names(catalog.search(conn, root=bag_root / "loose" / "camera.mcap")) == ["camera.mcap"]
     assert names(catalog.search(conn, "old", root=bag_root)) == ["old.db3"]
+
+
+def test_parallel_scan_matches_sequential(conn, bag_root, tmp_path, monkeypatch):
+    (bag_root / "broken.mcap").write_bytes(b"garbage")
+    monkeypatch.setattr(catalog, "PARALLEL_MIN", 1)
+    seen = []
+    r = catalog.scan(conn, [bag_root], workers=2, on_bag=lambda p, s, d, t: seen.append((s, d, t)))
+    assert (r.added, len(r.errors)) == (5, 1)
+    assert sorted(s for s, _, _ in seen) == ["added"] * 4 + ["error"]
+    assert [d for _, d, _ in seen] == [1, 2, 3, 4, 5] and {t for _, _, t in seen} == {5}
+
+    from bagarium import db
+    seq = db.connect(tmp_path / "seq.db")
+    catalog.scan(seq, [bag_root], workers=1)
+    fields = "name, storage, start_ns, end_ns, message_count, size_bytes, error IS NULL"
+    q = f"SELECT {fields} FROM bags ORDER BY path"
+    assert [tuple(r) for r in conn.execute(q)] == [tuple(r) for r in seq.execute(q)]
+    tq = "SELECT b.name, t.name, t.type, t.message_count FROM topics t JOIN bags b ON b.id = t.bag_id ORDER BY 1, 2"
+    assert [tuple(r) for r in conn.execute(tq)] == [tuple(r) for r in seq.execute(tq)]
+
+
+def test_migrates_old_topics_table(tmp_path):
+    import sqlite3
+
+    from bagarium import db
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript("""
+        CREATE TABLE bags (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, storage TEXT NOT NULL,
+            start_ns INTEGER, end_ns INTEGER, message_count INTEGER NOT NULL DEFAULT 0, size_bytes INTEGER NOT NULL DEFAULT 0,
+            mtime REAL NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '', missing INTEGER NOT NULL DEFAULT 0, error TEXT,
+            indexed_at TEXT NOT NULL);
+        CREATE TABLE topics (bag_id INTEGER NOT NULL REFERENCES bags(id) ON DELETE CASCADE, name TEXT NOT NULL,
+            type TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (bag_id, name, type));
+        INSERT INTO bags (id, path, name, storage, indexed_at) VALUES (1, '/a', 'a', 'mcap', ''), (2, '/b', 'b', 'mcap', '');
+        INSERT INTO topics VALUES (1, '/tf', 'tf2_msgs/msg/TFMessage', 10), (2, '/tf', 'tf2_msgs/msg/TFMessage', 20),
+                                  (2, '/odom', 'nav_msgs/msg/Odometry', 5);
+    """)
+    old.commit()
+    old.close()
+
+    conn = db.connect(path)
+    assert conn.execute("SELECT type FROM sqlite_master WHERE name = 'topics'").fetchone()[0] == "view"
+    assert conn.execute("SELECT COUNT(*) FROM topic_names").fetchone()[0] == 2
+    assert [tuple(r) for r in catalog.topics_of(conn, 2)] == [("/odom", "nav_msgs/msg/Odometry", 5),
+                                                             ("/tf", "tf2_msgs/msg/TFMessage", 20)]
+    assert names(catalog.search(conn, topics=["/odom"])) == ["b"]
+    conn.close()
+    db.connect(path).close()  # connecting again is a no-op

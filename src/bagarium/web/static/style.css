@@ -130,3 +130,5 @@ div.extract label.wide input[type=text] { flex: 1; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; }
 .legend label { display: flex; align-items: center; gap: 6px; }
 .swatch { display: inline-block; width: 14px; height: 4px; border-radius: 2px; background: var(--muted); }
+
+.pager { display: flex; gap: 16px; justify-content: center; align-items: center; margin: 12px 0; }

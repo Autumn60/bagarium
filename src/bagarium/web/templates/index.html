@@ -37,7 +37,7 @@
 {% endif %}
 
 <form method="get" action="/extract" id="bulk-form" class="bulk">
-  <p class="summary">{{ bags | length }} bags · {{ total_size | size }} ·
+  <p class="summary">{{ total }} bags · {{ total_size | size }}{% if pages > 1 %} · showing {{ first_index }}–{{ first_index + bags | length - 1 }}{% endif %} ·
     <a href="/map?{{ request.url.query }}">show on map</a></p>
   {% if bags %}
   <span class="muted"><span id="bulk-count">0</span> selected</span>
@@ -73,6 +73,13 @@
   </tbody>
 </table>
 </div>
+{% if pages > 1 %}
+<nav class="pager">
+  {% if page > 1 %}<a href="{{ page_url(page - 1) }}">← prev</a>{% endif %}
+  <span class="muted">page {{ page }} / {{ pages }}</span>
+  {% if page < pages %}<a href="{{ page_url(page + 1) }}">next →</a>{% endif %}
+</nav>
+{% endif %}
 {% else %}
 <p class="empty">No bags found. Add a folder on the <a href="/scan">Scan</a> page, or run <code>bagarium scan &lt;dir&gt;</code>.</p>
 {% endif %}

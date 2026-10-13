@@ -119,13 +119,13 @@ def test_web_queue_and_cancel(tmp_path, bag_root, monkeypatch):
     from bagarium import catalog
 
     gate = threading.Event()
-    original = catalog._index_one
+    original = catalog._store
 
-    def slow_index_one(*args):
+    def slow_store(*args):
         gate.wait(5)
         return original(*args)
 
-    monkeypatch.setattr(catalog, "_index_one", slow_index_one)
+    monkeypatch.setattr(catalog, "_store", slow_store)
     client = TestClient(create_app(tmp_path / "c.db"))
     client.post("/scan/roots", data={"path": str(bag_root)})
     assert client.post("/scan/run", data={}).url.path == "/jobs"
@@ -258,3 +258,19 @@ def test_root_filter(tmp_path, bag_root):
     assert [b["name"] for b in client.get("/api/bags", params={"root": str(bag_root / "2025-10-09")}).json()] \
         == ["run_db3", "run_lidar"]
     assert 'href="/?root=' in client.get("/scan").text
+
+
+def test_list_pagination(tmp_path, bag_root, monkeypatch):
+    import bagarium.web as web
+
+    monkeypatch.setattr(web, "PAGE_SIZE", 3)
+    dbp = tmp_path / "c.db"
+    run(dbp, "scan", bag_root)
+    client = TestClient(create_app(dbp))
+    first = client.get("/").text
+    assert "4 bags" in first and "showing 1–3" in first and "page 1 / 2" in first and "next →" in first
+    assert first.count('name="bag"') == 3
+    last = client.get("/", params={"page": 9}).text  # out of range: clamped to the last page
+    assert "page 2 / 2" in last and last.count('name="bag"') == 1 and "← prev" in last
+    filtered = client.get("/", params={"root": str(bag_root)}).text  # filters are kept in page links
+    assert f"root={str(bag_root).replace('/', '%2F')}&amp;page=2" in filtered

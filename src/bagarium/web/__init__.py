@@ -16,6 +16,8 @@ from .. import __version__, catalog, db, extract, fileops, fmt, importer, move, 
 from .jobs import MAX_ERRORS, Job, JobQueue
 
 HERE = Path(__file__).parent
+PAGE_SIZE = 200     # bags per list page
+MAP_LIMIT = 100     # bags drawn on the map page
 
 
 def create_app(db_path: str | Path | None = None) -> FastAPI:
@@ -82,6 +84,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         until: str = "",
         missing: bool = False,
         root: str = "",
+        page: int = Query(1, ge=1),
         conn: sqlite3.Connection = Depends(get_conn),
     ):
         tag = [t for t in tag if t]
@@ -93,9 +96,18 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             p = {k: v for k, v in params.items() if v and k != "tag"}
             return "/?" + urlencode({**p, "tag": new_tags}, doseq=True)
 
+        def page_url(n: int) -> str:
+            return "/?" + urlencode({**{k: v for k, v in params.items() if v}, "page": n}, doseq=True)
+
+        pages = max(1, -(-len(rows) // PAGE_SIZE))
+        page = min(page, pages)
+        shown = rows[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
         return templates.TemplateResponse(request, "index.html", {
-            "bags": rows,
-            "tag_map": catalog.tags_of(conn, (r["id"] for r in rows)),
+            "bags": shown,
+            "total": len(rows),
+            "page": page, "pages": pages, "page_url": page_url,
+            "first_index": (page - 1) * PAGE_SIZE + 1,
+            "tag_map": catalog.tags_of(conn, (r["id"] for r in shown)),
             "all_tags": catalog.all_tags(conn),
             "params": params,
             "roots": catalog.list_roots(conn),
@@ -119,9 +131,11 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         tag = [t for t in tag if t]
         rows, errors = run_search(conn, q, tag, topic, type, since, until, False, root)
         with_track = [r for r in rows if track.candidates(catalog.topics_of(conn, r["id"]))]
+        limited = len(with_track) > MAP_LIMIT
+        with_track = with_track[:MAP_LIMIT]
         params = {"q": q, "tag": tag, "topic": topic, "type": type, "since": since, "until": until, "root": root}
         return templates.TemplateResponse(request, "map.html", {
-            "bags": with_track, "total": len(rows), "errors": errors,
+            "bags": with_track, "total": len(rows), "errors": errors, "limited": limited, "map_limit": MAP_LIMIT,
             "list_url": "/?" + urlencode({k: v for k, v in params.items() if v}, doseq=True),
         })
 

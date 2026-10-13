@@ -12,6 +12,7 @@ from typing import Iterable, Iterator
 import yaml
 
 from . import scanner
+from .scanner import YAML_LOADER
 
 
 @dataclass
@@ -37,7 +38,7 @@ def layout(src: Path) -> Layout:
     if src.is_file():
         return Layout(scanner.storage_of(src), [src])
     with open(src / scanner.METADATA_FILE, encoding="utf-8") as f:
-        meta = (yaml.safe_load(f) or {})["rosbag2_bagfile_information"]
+        meta = (yaml.load(f, Loader=YAML_LOADER) or {})["rosbag2_bagfile_information"]
     fmt = meta.get("compression_format") or ""
     mode = (meta.get("compression_mode") or "").upper()
     if fmt and fmt != "zstd":

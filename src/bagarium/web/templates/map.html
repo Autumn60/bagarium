@@ -4,6 +4,7 @@
 <p><a href="{{ list_url }}">← back to the list</a></p>
 <h1>Map <span class="muted">({{ bags | length }} of {{ total }} bags have a position topic)</span></h1>
 {% for e in errors %}<p class="error">{{ e }}</p>{% endfor %}
+{% if limited %}<p class="flash">Showing the first {{ map_limit }} bags with a track; narrow the search to see others.</p>{% endif %}
 
 {% if bags %}
 <div id="map" class="map tall"></div>
