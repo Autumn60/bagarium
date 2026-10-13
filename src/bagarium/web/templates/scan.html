@@ -4,34 +4,7 @@
 <h1>Scan</h1>
 {% if error %}<p class="flash error">{{ error }}</p>{% endif %}
 
-<section class="card" id="scan-status" data-running="{{ 'true' if job.running else 'false' }}">
-  {% if job.running %}
-    <div class="status-line">
-      <strong id="status-title">{% if job.cancelling %}Cancelling…{% else %}Scanning…{% endif %}</strong>
-      <span id="progress-text" class="muted">{{ job.done }} / {{ job.total }}</span>
-    </div>
-    <progress id="progress" max="{{ job.total or 1 }}" value="{{ job.done }}"></progress>
-    <div class="muted current" id="current">{{ job.current or "looking for bags…" }}</div>
-    <div class="status-line">
-      <span id="counts" class="muted">added {{ job.added }} · updated {{ job.updated }} · moved {{ job.moved }} · unchanged {{ job.unchanged }} · errors {{ job.error_count }}</span>
-      <form method="post" action="/scan/cancel" class="inline"><button class="secondary">Cancel</button></form>
-    </div>
-  {% elif job.outcome %}
-    <div class="status-line">
-      <strong class="{{ 'error' if job.outcome == 'failed' }}">Last scan {{ job.outcome }}</strong>
-      <span class="muted">{{ job.finished_at }}</span>
-    </div>
-    <div>added {{ job.added }} · updated {{ job.updated }} · moved {{ job.moved }} · unchanged {{ job.unchanged }} · missing {{ job.missing }} · errors {{ job.error_count }}</div>
-    {% if job.errors %}
-      <details>
-        <summary>Errors{% if job.error_count > job.errors|length %} (first {{ job.errors|length }}){% endif %}</summary>
-        <ul class="errors">{% for e in job.errors %}<li><code>{{ e.path }}</code> {{ e.message }}</li>{% endfor %}</ul>
-      </details>
-    {% endif %}
-  {% else %}
-    <div class="muted">No scan has run since the server started.</div>
-  {% endif %}
-</section>
+{% if job.kind %}{% set next = "/scan" %}{% include "_job.html" %}{% endif %}
 
 <section>
   <div class="section-head">
@@ -91,25 +64,4 @@
   <p class="muted hint">Folders are scanned recursively. Removing a folder only stops scanning it; bags already indexed stay in the catalog.</p>
 </section>
 
-<script>
-  (() => {
-    const box = document.getElementById("scan-status");
-    if (box.dataset.running !== "true") return;
-    const $ = id => document.getElementById(id);
-    const poll = async () => {
-      let s;
-      try { s = await (await fetch("/api/scan")).json(); } catch { return setTimeout(poll, 2000); }
-      if (!s.running) return location.replace("/scan");
-      $("status-title").textContent = s.cancelling ? "Cancelling…" : "Scanning…";
-      $("progress-text").textContent = `${s.done} / ${s.total}`;
-      $("progress").max = s.total || 1;
-      $("progress").value = s.done;
-      $("current").textContent = s.current || "looking for bags…";
-      $("counts").textContent =
-        `added ${s.added} · updated ${s.updated} · moved ${s.moved} · unchanged ${s.unchanged} · errors ${s.error_count}`;
-      setTimeout(poll, 1000);
-    };
-    setTimeout(poll, 1000);
-  })();
-</script>
 {% endblock %}

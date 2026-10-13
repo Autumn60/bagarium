@@ -50,6 +50,11 @@ bagarium note 12 "sunny, good GNSS"
 bagarium note 12                 # edit in $EDITOR
 bagarium tags                    # list tags
 
+# Extract a time range and/or topics into a new bag (same storage format, playable with ros2 bag play)
+bagarium extract 12 -s 60 -d 30                       # 30 s starting 60 s into the bag
+bagarium extract 12 -s 1:00 -e 1:30 -t '/sensing/*' -x '*/image_raw'
+bagarium extract 12 -s 2026-09-03T16:40:00 -e 2026-09-03T16:41:00 -o ~/rosbags/cut
+
 # Web UI (http://127.0.0.1:8000/)
 bagarium serve
 ```
@@ -62,6 +67,17 @@ bagarium serve
 - If a bag is moved or renamed, the next scan recognizes it as **moved** when it finds a bag with identical content
   (start/end time, message count and size), and carries its tags and notes over.
 - Unreadable bags are still registered with an `error` (see the reason with `bagarium show`).
+- Bags nested inside a bag directory (e.g. `<bag>/derivatives/<cut>`) are indexed as separate bags.
+
+### Extraction
+
+- Times are seconds from the bag start (`90`, `1:30`, `1:02:03`) or local date-times; both ends are inclusive.
+- Topic patterns match the whole name, with glob wildcards (`/tf` does not match `/tf_static`).
+- The output is a bag directory with `metadata.yaml`, in the source's storage format
+  (sqlite3 output uses the Humble schema, so any ROS 2 distro can play it). Split bags are merged,
+  and zstd-compressed bags (file or message mode) are written uncompressed.
+- The output defaults to `<bag>_extract_<timestamp>` next to the source, and is added to the catalog
+  with a note describing where it came from (`--no-index` to skip).
 
 ### Catalog database location
 
@@ -70,9 +86,10 @@ Defaults to `~/.local/share/bagarium/bagarium.db`. Override with `--db PATH` or 
 ## Web UI
 
 - List: search by keyword, topic, message type and date; click tags to filter
-- Detail: metadata, topic list (message counts and average rates), tag and note editing
+- Detail: metadata, topic list (filterable, with message counts and average rates), tag and note editing,
+  and extraction (pick topics and a time range; runs in the background)
 - Scan: register / remove folders and scan them in the background with a progress bar (cancellable)
-- JSON API: `/api/bags`, `/api/bags/{id}`, `/api/scan` (spec at `/api/docs`)
+- JSON API: `/api/bags`, `/api/bags/{id}`, `/api/job` (spec at `/api/docs`)
 
 The server listens on `127.0.0.1` only by default. There is no authentication, so be careful when exposing it with `--host 0.0.0.0`.
 

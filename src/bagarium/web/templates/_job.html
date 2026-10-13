@@ -1,0 +1,57 @@
+{# Status card for the background job. Expects `job` (JobRunner.status()) and `next` (URL to return to). #}
+{% macro stats_text(stats) %}{% for k, v in stats.items() %}{{ k }} {{ v | count }}{{ " · " if not loop.last }}{% endfor %}{% endmacro %}
+{% macro progress_text(job) %}{% if job.kind == "scan" %}{{ job.done }} / {{ job.total }}{% else %}{{ (100 * job.done / (job.total or 1)) | round | int }}%{% endif %}{% endmacro %}
+
+<section class="card" id="job-status" data-running="{{ 'true' if job.running else 'false' }}">
+  {% if job.running %}
+    <div class="status-line">
+      <strong id="job-title">{{ job.label }}{% if job.cancelling %} (cancelling…){% endif %}</strong>
+      <span id="job-progress-text" class="muted">{{ progress_text(job) }}</span>
+    </div>
+    <progress id="job-progress" max="{{ job.total or 1 }}" value="{{ job.done }}"></progress>
+    <div class="muted current" id="job-current">{{ job.current or "starting…" }}</div>
+    <div class="status-line">
+      <span id="job-stats" class="muted">{{ stats_text(job.stats) }}</span>
+      <form method="post" action="/jobs/cancel" class="inline">
+        <input type="hidden" name="next" value="{{ next }}">
+        <button class="secondary">Cancel</button>
+      </form>
+    </div>
+  {% else %}
+    <div class="status-line">
+      <strong class="{{ 'error' if job.outcome == 'failed' }}">{{ job.label }}: {{ job.outcome }}</strong>
+      <span class="muted">{{ job.finished_at }}</span>
+    </div>
+    {% if job.error %}<div class="error">{{ job.error }}</div>{% endif %}
+    {% if job.stats %}<div>{{ stats_text(job.stats) }}</div>{% endif %}
+    {% if job.result_bag_id %}<div>Created <a href="/bags/{{ job.result_bag_id }}"><code class="path">{{ job.result_path }}</code></a></div>{% endif %}
+    {% if job.errors %}
+      <details>
+        <summary>Errors{% if job.stats.errors and job.stats.errors > job.errors|length %} (first {{ job.errors|length }}){% endif %}</summary>
+        <ul class="errors">{% for e in job.errors %}<li><code>{{ e.path }}</code> {{ e.message }}</li>{% endfor %}</ul>
+      </details>
+    {% endif %}
+  {% endif %}
+</section>
+
+{% if job.running %}
+<script>
+  (() => {
+    const $ = id => document.getElementById(id);
+    const poll = async () => {
+      let s;
+      try { s = await (await fetch("/api/job")).json(); } catch { return setTimeout(poll, 2000); }
+      if (!s.running) return location.replace({{ next | tojson }});
+      $("job-title").textContent = s.label + (s.cancelling ? " (cancelling…)" : "");
+      $("job-progress-text").textContent = s.kind === "scan"
+        ? `${s.done} / ${s.total}` : `${Math.round(100 * s.done / (s.total || 1))}%`;
+      $("job-progress").max = s.total || 1;
+      $("job-progress").value = s.done;
+      $("job-current").textContent = s.current || "starting…";
+      $("job-stats").textContent = Object.entries(s.stats).map(([k, v]) => `${k} ${v.toLocaleString()}`).join(" · ");
+      setTimeout(poll, 1000);
+    };
+    setTimeout(poll, 1000);
+  })();
+</script>
+{% endif %}

@@ -7,6 +7,9 @@
   {% if bag.error %}<span class="badge err">error</span>{% endif %}
 </h1>
 
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+{% if job.kind == "extract" and job.bag_id == bag.id %}{% set next = "/bags/" ~ bag.id %}{% include "_job.html" %}{% endif %}
+
 <dl class="meta">
   <dt>Path</dt><dd><code class="path">{{ bag.path }}</code> <button type="button" class="copy" data-copy="{{ bag.path }}">copy</button></dd>
   <dt>Storage</dt><dd>{{ bag.storage }}</dd>
@@ -46,15 +49,26 @@
   </form>
 </section>
 
+{% set can_extract = not bag.missing and not bag.error and topics %}
 <section>
-  <h2>Topics <span class="muted">({{ topics | length }})</span></h2>
+  <div class="section-head">
+    <h2>Topics <span class="muted">({{ topics | length }})</span></h2>
+    <div class="actions">
+      <input type="search" id="topic-filter" placeholder="filter topics / types">
+      {% if can_extract %}
+      <button type="button" class="secondary" id="check-visible">Select shown</button>
+      <button type="button" class="secondary" id="uncheck-visible">Deselect shown</button>
+      {% endif %}
+    </div>
+  </div>
   <div class="table-wrap">
   <table class="topics">
-    <thead><tr><th>Topic</th><th>Type</th><th class="num">Messages</th><th class="num">Rate</th></tr></thead>
+    <thead><tr>{% if can_extract %}<th class="check"><input type="checkbox" id="check-all" checked title="all topics"></th>{% endif %}<th>Topic</th><th>Type</th><th class="num">Messages</th><th class="num">Rate</th></tr></thead>
     <tbody>
     {% set secs = ((bag.end_ns or 0) - (bag.start_ns or 0)) / 1e9 %}
     {% for t in topics %}
-      <tr>
+      <tr data-search="{{ t.name | lower }} {{ t.type | lower }}">
+        {% if can_extract %}<td class="check"><input type="checkbox" name="topic" value="{{ t.name }}" form="extract-form" checked></td>{% endif %}
         <td><a href="/?topic={{ t.name | urlencode }}">{{ t.name }}</a></td>
         <td><a href="/?type={{ t.type | urlencode }}">{{ t.type }}</a></td>
         <td class="num">{{ t.message_count | count }}</td>
@@ -66,7 +80,48 @@
   </div>
 </section>
 
+{% if can_extract %}
+<section>
+  <h2>Extract</h2>
+  <form method="post" action="/bags/{{ bag.id }}/extract" id="extract-form" class="extract">
+    <div class="fields">
+      <label>Start <input type="text" name="start" placeholder="0" size="10"></label>
+      <label>End <input type="text" name="end" placeholder="{{ '%.1f' | format(secs) }}" size="10"></label>
+      <span class="muted">seconds from bag start (<code>90</code>, <code>1:30</code>) or a time (<code>{{ (bag.start_ns | time)[:10] }}T12:00:00</code>); empty = whole bag</span>
+    </div>
+    <label class="wide">Output <input type="text" name="output" value="{{ default_output }}"></label>
+    <div class="status-line">
+      <span class="muted"><span id="selected-count">{{ topics | length }}</span> of {{ topics | length }} topics selected · written as a new {{ bag.storage }} bag, then added to the catalog</span>
+      <button type="submit" {% if job.running %}disabled title="another job is running"{% endif %}>Extract</button>
+    </div>
+  </form>
+</section>
+{% endif %}
+
 <script>
+  (() => {
+    const rows = [...document.querySelectorAll("table.topics tbody tr")];
+    const boxes = rows.map(r => r.querySelector("input[name=topic]")).filter(Boolean);
+    const all = document.getElementById("check-all");
+    const count = document.getElementById("selected-count");
+    const visible = () => rows.filter(r => !r.hidden).map(r => r.querySelector("input[name=topic]")).filter(Boolean);
+    const refresh = () => {
+      if (!count) return;
+      const n = boxes.filter(b => b.checked).length;
+      count.textContent = n;
+      all.checked = n === boxes.length;
+      all.indeterminate = n > 0 && n < boxes.length;
+    };
+    document.getElementById("topic-filter").addEventListener("input", e => {
+      const q = e.target.value.trim().toLowerCase();
+      rows.forEach(r => r.hidden = q && !r.dataset.search.includes(q));
+    });
+    all?.addEventListener("change", () => { boxes.forEach(b => b.checked = all.checked); refresh(); });
+    document.getElementById("check-visible")?.addEventListener("click", () => { visible().forEach(b => b.checked = true); refresh(); });
+    document.getElementById("uncheck-visible")?.addEventListener("click", () => { visible().forEach(b => b.checked = false); refresh(); });
+    boxes.forEach(b => b.addEventListener("change", refresh));
+  })();
+
   document.querySelectorAll("button.copy").forEach(btn => btn.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(btn.dataset.copy); btn.textContent = "copied"; }
     catch { btn.textContent = "copy failed"; }

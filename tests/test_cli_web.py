@@ -76,12 +76,12 @@ def test_web(tmp_path, bag_root):
     assert evil.status_code == 403
 
 
-def wait_for_scan(client, timeout=10.0):
+def wait_for_job(client, timeout=10.0):
     import time
 
     deadline = time.monotonic() + timeout
-    while (status := client.get("/api/scan").json())["running"]:
-        assert time.monotonic() < deadline, "scan did not finish"
+    while (status := client.get("/api/job").json())["running"]:
+        assert time.monotonic() < deadline, "job did not finish"
         time.sleep(0.05)
     return status
 
@@ -96,41 +96,67 @@ def test_web_scan(tmp_path, bag_root):
     assert "not a registered root" in client.post("/scan/run", data={"root": "/etc"}).text
 
     client.post("/scan/run", data={"root": str(bag_root)})
-    status = wait_for_scan(client)
-    assert status["outcome"] == "completed" and status["added"] == 4 and status["total"] == 4
+    status = wait_for_job(client)
+    assert status["outcome"] == "completed" and status["stats"]["added"] == 4 and status["total"] == 4
     page = client.get("/scan").text
-    assert "Last scan completed" in page and "added 4" in page
+    assert ": completed" in page and "added 4" in page
     assert len(client.get("/api/bags").json()) == 4
 
     client.post("/scan/run", data={"force": "true"})
-    assert wait_for_scan(client)["updated"] == 4
+    assert wait_for_job(client)["stats"]["updated"] == 4
 
     client.post("/scan/roots/remove", data={"path": str(bag_root)})
     assert "No folders registered" in client.get("/scan").text
     assert len(client.get("/api/bags").json()) == 4
 
 
-def test_web_scan_cancel(tmp_path, bag_root):
+def test_web_scan_cancel(tmp_path, bag_root, monkeypatch):
     import threading
 
-    app = create_app(tmp_path / "c.db")
-    job = app.state.scan_job
+    from bagarium import catalog
+
     gate = threading.Event()
-    original = job._on_bag
+    original = catalog._index_one
 
-    def slow_on_bag(*args):
+    def slow_index_one(*args):
         gate.wait(5)
-        original(*args)
+        return original(*args)
 
-    job._on_bag = slow_on_bag
-    client = TestClient(app)
+    monkeypatch.setattr(catalog, "_index_one", slow_index_one)
+    client = TestClient(create_app(tmp_path / "c.db"))
     client.post("/scan/roots", data={"path": str(bag_root)})
     client.post("/scan/run", data={})
-    assert client.get("/api/scan").json()["running"]
+    assert client.get("/api/job").json()["running"]
     assert "already running" in client.post("/scan/run", data={}).text
-    assert "Scanning" in client.get("/scan").text
+    assert "Cancel" in client.get("/scan").text
 
-    client.post("/scan/cancel")
+    client.post("/jobs/cancel", data={"next": "/scan"})
     gate.set()
-    status = wait_for_scan(client)
+    status = wait_for_job(client)
     assert status["outcome"] == "cancelled" and status["done"] == 1
+
+
+def test_web_extract(tmp_path, bag_root):
+    client = TestClient(create_app(tmp_path / "c.db"))
+    client.post("/scan/roots", data={"path": str(bag_root)})
+    client.post("/scan/run", data={})
+    wait_for_job(client)
+    bag_id = next(b["id"] for b in client.get("/api/bags").json() if b["name"] == "run_lidar")
+    page = client.get(f"/bags/{bag_id}").text
+    assert 'id="extract-form"' in page and 'name="topic" value="/tf"' in page
+
+    url = f"/bags/{bag_id}/extract"
+    out = tmp_path / "web_out"
+    assert "select at least one topic" in client.post(url, data={"output": str(out)}).text
+    assert "invalid time" in client.post(url, data={"topic": ["/tf"], "start": "soon"}).text
+    assert "start is after end" in client.post(url, data={"topic": ["/tf"], "start": "2", "end": "1"}).text
+    assert "already exists" in client.post(url, data={"topic": ["/tf"], "output": str(tmp_path)}).text
+
+    client.post(url, data={"topic": ["/tf"], "start": "0.5", "end": "1:00", "output": str(out)})
+    status = wait_for_job(client)
+    assert status["outcome"] == "completed", status
+    assert status["stats"]["messages"] == 16  # /tf at 0.1 s steps from 0.5 s to 2.0 s
+    new = client.get(f"/api/bags/{status['result_bag_id']}").json()
+    assert new["path"] == str(out) and [t["name"] for t in new["topics"]] == ["/tf"]
+    assert "Extracted from" in new["note"]
+    assert f'href="/bags/{new["id"]}"' in client.get(f"/bags/{bag_id}").text

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from . import __version__, catalog, db, fmt
+from . import __version__, catalog, db, extract, fmt
 
 
 class Ctx:
@@ -265,6 +265,58 @@ def prune(c: Ctx, yes: bool) -> None:
     if not yes:
         click.confirm(f"forget {len(ids)} missing bag(s) including their tags and notes?", abort=True)
     click.echo(f"forgot {catalog.forget(c.conn, ids)} bag(s)")
+
+
+@main.command(name="extract")
+@click.argument("bag")
+@click.option("-o", "--output", type=click.Path(path_type=Path),
+              help="Output bag directory (default: <bag>_extract_<timestamp> next to the source).")
+@click.option("-s", "--start", metavar="TIME", help="Start: seconds from bag start (90, 1:30) or a time (2026-09-02T09:30:00).")
+@click.option("-e", "--end", metavar="TIME", help="End, same format as --start.")
+@click.option("-d", "--duration", type=float, metavar="SECONDS", help="Length from --start (instead of --end).")
+@click.option("-t", "--topic", "topics", multiple=True, metavar="PATTERN",
+              help="Keep topics matching this name or glob (repeatable; default: all).")
+@click.option("-x", "--exclude", multiple=True, metavar="PATTERN", help="Drop topics matching this name or glob (repeatable).")
+@click.option("--no-index", is_flag=True, help="Do not add the result to the catalog.")
+@pass_ctx
+def extract_cmd(c: Ctx, bag: str, output, start, end, duration, topics, exclude, no_index) -> None:
+    """Write a time range and/or a subset of topics of BAG to a new bag.
+
+    The new bag has the same storage format (sqlite3 / mcap) and can be played
+    with `ros2 bag play`. Split and compressed bags are supported.
+    """
+    r = c.bag(bag)
+    if end and duration is not None:
+        raise click.UsageError("use either --end or --duration")
+    try:
+        start_ns = extract.parse_bag_time(start, r["start_ns"]) if start else None
+        end_ns = extract.parse_bag_time(end, r["start_ns"]) if end else None
+    except ValueError as e:
+        raise click.BadParameter(str(e))
+    if duration is not None:
+        base = start_ns if start_ns is not None else r["start_ns"]
+        if base is None:
+            raise click.UsageError("bag has no start time")
+        end_ns = base + round(duration * 1e9)
+
+    names = [t["name"] for t in catalog.topics_of(c.conn, r["id"])]
+    if names and not extract.select_topics(names, topics, exclude):
+        raise click.ClickException("no topics match the given patterns")
+    out = output or extract.default_output_path(Path(r["path"]))
+
+    with click.progressbar(length=1000, label="extracting", show_percent=True) as bar:
+        def on_progress(frac: float, written: int) -> None:
+            bar.update(round(frac * 1000) - bar.pos)
+
+        try:
+            result, new_id = extract.extract_bag(c.conn, r, out, start_ns, end_ns, topics, exclude,
+                                                 on_progress, index=not no_index)
+        except (FileExistsError, ValueError) as e:
+            raise click.ClickException(str(e))
+
+    click.echo(f"wrote {fmt.count(result.message_count)} messages on {len(result.topics)} topics to {result.path}")
+    if new_id is not None:
+        click.echo(f"added to catalog as #{new_id}")
 
 
 @main.command()

@@ -89,3 +89,11 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 code.path { overflow-wrap: anywhere; }
 .hint { font-size: 12px; }
 ul.errors { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+
+th.check, td.check { width: 28px; padding-right: 0; }
+#topic-filter { min-width: 220px; }
+form.extract { display: flex; flex-direction: column; gap: 10px; background: var(--card);
+  border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
+form.extract .fields { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+form.extract label { display: flex; gap: 6px; align-items: center; }
+form.extract label.wide input { flex: 1; }

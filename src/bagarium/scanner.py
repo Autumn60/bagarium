@@ -43,7 +43,8 @@ class BagInfo:
 def discover(root: Path) -> Iterator[Path]:
     """Yield bag paths under ``root``.
 
-    A directory containing ``metadata.yaml`` is one bag (not descended into).
+    A directory containing ``metadata.yaml`` is one bag; its own data files are
+    part of it, but subdirectories are still searched (e.g. ``derivatives/``).
     Any other ``.mcap`` / ``.db3`` file is treated as a standalone bag.
     """
     root = Path(root).resolve()
@@ -52,25 +53,28 @@ def discover(root: Path) -> Iterator[Path]:
             yield root
         return
     for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
         if METADATA_FILE in filenames:
-            dirnames.clear()
             yield Path(dirpath)
             continue
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
         for name in sorted(filenames):
             if Path(name).suffix in BAG_SUFFIXES:
                 yield Path(dirpath) / name
 
 
 def stat_bag(path: Path) -> tuple[int, float]:
-    """Return (total size in bytes, latest mtime) of a bag file or directory."""
+    """Return (total size in bytes, latest mtime) of a bag file or directory.
+
+    For a bag directory only the files directly inside it count, so nested
+    bags (e.g. ``derivatives/``) are not included.
+    """
     if path.is_file():
         st = path.stat()
         return st.st_size, st.st_mtime
     size, mtime = 0, path.stat().st_mtime
-    for dirpath, _, filenames in os.walk(path):
-        for name in filenames:
-            st = (Path(dirpath) / name).stat()
+    for entry in os.scandir(path):
+        if entry.is_file():
+            st = entry.stat()
             size += st.st_size
             mtime = max(mtime, st.st_mtime)
     return size, mtime
