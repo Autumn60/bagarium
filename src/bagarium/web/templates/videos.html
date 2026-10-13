@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Previews · bagarium{% endblock %}
+{% block content %}
+<p><a href="/">← all bags</a></p>
+<h1>Preview videos for {{ rows | length }} bag{{ "s" if rows | length != 1 }}</h1>
+<h2>Make</h2>
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+
+{% if not rows %}
+<p class="empty">No bags selected. Pick bags with the checkboxes on the <a href="/">list</a>.</p>
+{% else %}
+<form method="post" action="/videos" class="extract">
+  {% for r in rows %}<input type="hidden" name="bag" value="{{ r.bag.id }}">{% endfor %}
+  <div class="fields">
+    <label><input type="radio" name="what" value="{{ ALL }}" checked> all cameras side by side</label>
+    <label><input type="radio" name="what" value="each"> each camera separately</label>
+    {% for t in topics %}
+    <label><input type="radio" name="what" value="{{ t.name }}"> {{ t.label }} <span class="muted">({{ t.count }} bags)</span></label>
+    {% endfor %}
+  </div>
+  <div class="status-line">
+    <span class="muted">One job per bag in the video queue ({{ workers }} at a time; scans and file operations are not held up).
+      Existing previews and broken bags are skipped.</span>
+    <button type="submit">Queue previews</button>
+  </div>
+</form>
+
+<section>
+  <h2>Download <span class="muted">({{ ready_total }} ready)</span></h2>
+  <form method="get" action="/videos/download" class="extract">
+    {% for r in rows %}<input type="hidden" name="bag" value="{{ r.bag.id }}">{% endfor %}
+    <div class="fields">
+      <label><input type="radio" name="what" value="ready" checked> every preview that is ready</label>
+      <label><input type="radio" name="what" value="{{ ALL }}"> all cameras side by side</label>
+      <label><input type="radio" name="what" value="each"> each camera separately</label>
+      {% for t in topics %}
+      <label><input type="radio" name="what" value="{{ t.name }}"> {{ t.label }}</label>
+      {% endfor %}
+    </div>
+    <div class="status-line">
+      <span class="muted">One zip with readable names (&lt;bag&gt;_&lt;camera&gt;.mp4). Previews not made yet are left out.</span>
+      <button type="submit" class="secondary" {% if not ready_total %}disabled title="make previews first"{% endif %}>Download zip</button>
+    </div>
+  </form>
+</section>
+
+<section>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Name</th><th class="num">Duration</th><th>Cameras</th><th>Ready</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr class="{% if r.bag.missing or r.bag.error %}missing{% endif %}">
+        <td><a href="/bags/{{ r.bag.id }}">{{ r.bag.name }}</a>
+          {% if r.bag.missing %}<span class="badge warn">missing</span>{% endif %}
+          {% if r.bag.problem %}<span class="badge err" title="{{ r.bag.problem }}">broken</span>{% elif r.bag.error %}<span class="badge err" title="{{ r.bag.error }}">error</span>{% endif %}</td>
+        <td class="num">{{ duration(r.bag.start_ns, r.bag.end_ns) }}</td>
+        <td>{{ r.cameras | join(", ") or "—" }}</td>
+        <td>{{ r.ready | join(", ") or "—" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

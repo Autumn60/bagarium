@@ -17,6 +17,7 @@
   <label>from <input type="date" name="since" value="{{ params.since }}"></label>
   <label>to <input type="date" name="until" value="{{ params.until }}"></label>
   <label class="check"><input type="checkbox" name="missing" value="true" {% if params.missing %}checked{% endif %}> missing</label>
+  <label class="check"><input type="checkbox" name="broken" value="true" {% if params.broken %}checked{% endif %}> broken only</label>
   {% for t in params.tag %}<input type="hidden" name="tag" value="{{ t }}">{% endfor %}
   <button type="submit">Search</button>
   <a class="reset" href="/">Reset</a>
@@ -43,6 +44,7 @@
   <span class="muted"><span id="bulk-count">0</span> selected</span>
   <button type="submit" id="bulk-extract" disabled>Extract selected…</button>
   <button type="submit" id="bulk-move" class="secondary" formaction="/move" disabled>Move selected…</button>
+  <button type="submit" id="bulk-videos" class="secondary" formaction="/videos" disabled>Previews…</button>
   {% endif %}
 </form>
 
@@ -60,7 +62,7 @@
       <td>
         <a href="/bags/{{ b.id }}">{{ b.name }}</a>
         {% if b.missing %}<span class="badge warn">missing</span>{% endif %}
-        {% if b.error %}<span class="badge err" title="{{ b.error }}">error</span>{% endif %}
+        {% if b.problem %}<span class="badge err" title="{{ b.problem }}">broken</span>{% elif b.error %}<span class="badge err" title="{{ b.error }}">error</span>{% endif %}
         {% if b.note %}<div class="note-preview">{{ b.note | truncate(80) }}</div>{% endif %}
       </td>
       <td class="num">{{ duration(b.start_ns, b.end_ns) }}</td>
@@ -93,6 +95,7 @@
       document.getElementById("bulk-count").textContent = n;
       document.getElementById("bulk-extract").disabled = n === 0;
       document.getElementById("bulk-move").disabled = n === 0;
+      document.getElementById("bulk-videos").disabled = n === 0;
       all.checked = n === boxes.length;
       all.indeterminate = n > 0 && n < boxes.length;
     };

@@ -37,6 +37,7 @@ bagarium ls --topic '/camera/*/image_raw'   # topic name (substring or glob)
 bagarium ls --type PointCloud2              # message type
 bagarium ls --since 2026-10-01 --until 2026-10-07
 bagarium ls --root ~/rosbags                # only bags under this folder
+bagarium ls --broken                        # bags with damaged / unreadable data
 bagarium ls --json
 bagarium ls -t good --paths | xargs -n1 ros2 bag play   # print paths only, for piping
 
@@ -74,6 +75,12 @@ bagarium import /media/me/SSD/rosbags ~/rosbags/ssd -i '2026-09-*/*' -x '*/deriv
 bagarium track 12 > run.geojson
 bagarium track --format csv --topic /sensing/gnss/fix 12
 
+# Camera topic to MP4 (needs ffmpeg)
+bagarium video 12 --list
+bagarium video 12 --topic /sensing/camera/center/image_raw/compressed -s 60 -e 90 -o center.mp4
+bagarium video 12 --tile                                  # all cameras side by side (left, center, right)
+bagarium video --tile -O ~/videos -j 3 $(bagarium ls -t outdoor --paths)   # many bags, 3 at a time
+
 # Web UI (http://127.0.0.1:8000/)
 bagarium serve
 ```
@@ -86,6 +93,11 @@ bagarium serve
 - If a bag is moved or renamed, the next scan recognizes it as **moved** when it finds a bag with identical content
   (start/end time, message count and size), and carries its tags and notes over.
 - Unreadable bags are still registered with an `error` (see the reason with `bagarium show`).
+- Data files are checked for damage when a bag is new or changed (reading only a few bytes of each file):
+  missing files, sqlite3 files shorter than their header says, mcap files that do not end properly, and
+  zstd files whose last block is missing. Such bags are marked **broken**. Batch operations (extracting,
+  previews, the map, importing) skip broken bags with the reason; an operation on one explicitly chosen
+  bag is still attempted, since part of it may be readable. Moving is not affected.
 - Bags nested inside a bag directory (e.g. `<bag>/derivatives/<cut>`) are indexed as separate bags.
 
 ### Extraction
@@ -140,6 +152,23 @@ bagarium serve
   cache is rebuilt when the bag changes. The first read of a large bag can take several seconds.
 - Map tiles (OpenStreetMap, GSI 地理院タイル standard / aerial photo) are loaded from the internet.
 
+### Camera previews
+
+- `sensor_msgs/msg/CompressedImage` (JPEG / PNG) and `sensor_msgs/msg/Image` (rgb8, bgr8, rgba8, bgra8,
+  mono8, mono16, bayer_*8) are read without ROS; depth streams are left out. Encoding uses ffmpeg (H.264).
+- Videos run on the bag's clock: time t in the video is t seconds after the bag start (gaps repeat the
+  previous frame), so the map can follow the video. The frame rate is taken from the camera (max 15 fps)
+  and previews are scaled to 720p.
+- Several cameras can be put side by side (`--tile`, or "all" in the web UI): one row up to 3 cameras,
+  then a grid; labelled, with the local time on top. Ordered left → center/front → right, rear cameras last.
+- Preview videos for many bags can be queued at once from the list ("Previews…"), and the ones that are
+  ready downloaded there as one zip with readable names (`<bag>_<camera>.mp4`, `<bag>_all.mp4`); a single
+  preview can be downloaded from its bag page. Video jobs run in their
+  own lane, 3 at a time by default (`BAGARIUM_VIDEO_WORKERS`; at most CPU cores / 4), so scans and file
+  operations are not held up by them.
+- Thumbnails and preview videos are cached in `~/.cache/bagarium` (`XDG_CACHE_HOME`) and remade when the
+  bag changes; they can be deleted at any time.
+
 ### Catalog database location
 
 Defaults to `~/.local/share/bagarium/bagarium.db`. Override with `--db PATH` or the `BAGARIUM_DB` environment variable.
@@ -148,18 +177,20 @@ Defaults to `~/.local/share/bagarium/bagarium.db`. Override with `--db PATH` or 
 
 - List: search by keyword, topic, message type, date and registered folder (dropdown); click tags to filter;
   "show on map" draws the tracks of the listed bags on one map; select bags to extract from or move
-- Detail: metadata, driving track on a map (click it for the time at that spot and use it as the
-  extraction start / end), topic list (filterable, with message counts and average rates), tag and note editing,
+- Detail: metadata, camera thumbnails and preview videos (made in the background; the map shows where
+  the vehicle is while the video plays), driving track on a map (click it for the time at that spot, to play
+  the video from there or use it as the extraction start / end), topic list (filterable, with message counts and average rates), tag and note editing,
   and extraction (pick topics and a time range; runs in the background)
 - Extract: batch extraction from the selected bags, with topics shown across all of them
 - Move: move the selected bags (or one bag from its page) to a folder
 - Import: preview an import from another disk, pick the bags to copy, and queue it
-- Jobs: scans and extractions started from the UI are queued and run one at a time, in order.
+- Jobs: scans, extractions, moves and imports started from the UI are queued and run one at a time, in
+  order; preview videos run in a separate lane, a few at a time.
   The page shows the running job's progress, the queue (remove queued jobs, cancel the running one)
   and finished jobs with per-bag results. Outputs of queued extractions are reserved, so jobs queued
   with the same names do not collide. The queue lives in the server process and is lost on restart.
 - Scan: register / remove folders and scan them in the background with a progress bar (cancellable)
-- JSON API: `/api/bags`, `/api/bags/{id}`, `/api/bags/{id}/track`, `/api/jobs`, `/api/jobs/{id}` (spec at `/api/docs`)
+- JSON API: `/api/bags`, `/api/bags/{id}`, `/api/bags/{id}/track`, `/bags/{id}/thumbnail`, `/bags/{id}/video`, `/videos/download`, `/api/jobs`, `/api/jobs/{id}` (spec at `/api/docs`)
 
 The server listens on `127.0.0.1` only by default. There is no authentication, so be careful when exposing it with `--host 0.0.0.0`.
 

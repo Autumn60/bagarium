@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from . import __version__, catalog, db, extract, fileops, fmt, importer, move, track
+from . import __version__, catalog, db, extract, fileops, fmt, importer, move, track, video
 
 
 class Ctx:
@@ -134,13 +134,15 @@ def _time_option(name: str, end: bool):
 @click.option("-r", "--root", type=click.Path(file_okay=False, path_type=Path),
               help="Only bags at or under this directory (e.g. a registered root).")
 @click.option("--missing", is_flag=True, help="Include bags whose files are gone.")
+@click.option("--broken", is_flag=True, help="Only bags that are unreadable or have damaged data files.")
 @click.option("-n", "--limit", type=int, help="Show at most N bags.")
 @click.option("--paths", "paths_only", is_flag=True, help="Print only paths (for piping).")
 @click.option("--json", "as_json", is_flag=True, help="Print JSON.")
 @pass_ctx
-def ls(c: Ctx, query, tags, topics, types, since, until, root, missing, limit, paths_only, as_json) -> None:
+def ls(c: Ctx, query, tags, topics, types, since, until, root, missing, broken, limit, paths_only, as_json) -> None:
     """List / search bags. QUERY words match name, path and note."""
-    rows = catalog.search(c.conn, " ".join(query), tags, topics, types, since, until, missing, limit, root=root)
+    rows = catalog.search(c.conn, " ".join(query), tags, topics, types, since, until, missing, limit, root=root,
+                          broken=broken)
     tag_map = catalog.tags_of(c.conn, (r["id"] for r in rows))
 
     if paths_only:
@@ -156,7 +158,8 @@ def ls(c: Ctx, query, tags, topics, types, since, until, root, missing, limit, p
 
     table = [("ID", "START", "DURATION", "SIZE", "MSGS", "NAME", "TAGS")]
     for r in rows:
-        name = r["name"] + (" [missing]" if r["missing"] else "") + (" [error]" if r["error"] else "")
+        name = r["name"] + (" [missing]" if r["missing"] else "") \
+            + (" [broken]" if r["problem"] else " [error]" if r["error"] else "")
         table.append((str(r["id"]), fmt.time(r["start_ns"]), fmt.duration(r["start_ns"], r["end_ns"]),
                       fmt.size(r["size_bytes"]), fmt.count(r["message_count"]), name, ",".join(tag_map[r["id"]])))
     widths = [max(len(row[i]) for row in table) for i in range(len(table[0]) - 1)]
@@ -190,6 +193,8 @@ def show(c: Ctx, bag: str, as_json: bool) -> None:
         fields.append(("status", click.style("missing (files not found at last scan)", fg="red")))
     if r["error"]:
         fields.append(("error", click.style(r["error"], fg="red")))
+    if r["problem"]:
+        fields.append(("problem", click.style(r["problem"], fg="red")))
     for key, value in fields:
         click.echo(f"{key:>9}  {value}")
     if r["note"]:
@@ -470,6 +475,139 @@ def track_cmd(c: Ctx, bags: tuple[str, ...], topic: str | None, fmt_: str) -> No
             features.append(track.to_geojson(t, r))
     if fmt_ == "geojson":
         click.echo(json.dumps({"type": "FeatureCollection", "features": features}, ensure_ascii=False))
+
+
+@main.command(name="video")
+@click.argument("bags", nargs=-1, required=True)
+@click.option("--topic", "topics", multiple=True,
+              help="Camera topic (default: the first one; see --list). Repeat with --tile to pick several.")
+@click.option("--tile", is_flag=True,
+              help="Put cameras side by side: the --topic ones in the given order, or all in left/center/right order.")
+@click.option("-o", "--output", type=click.Path(dir_okay=False, path_type=Path), help="MP4 file to write (single BAG).")
+@click.option("-O", "--output-dir", type=click.Path(file_okay=False, path_type=Path),
+              help="Directory for the videos (default: current directory).")
+@click.option("-s", "--start", metavar="TIME", help="Start: seconds from each bag's start (90, 1:30) or a time.")
+@click.option("-e", "--end", metavar="TIME", help="End, same format as --start.")
+@click.option("--height", type=int, default=video.PREVIEW_HEIGHT, show_default=True,
+              help="Scale each camera down to at most this height (0: keep the original size).")
+@click.option("-j", "--jobs", "parallel", type=int, default=1, show_default=True, help="Bags to encode at the same time.")
+@click.option("--list", "list_only", is_flag=True, help="List the camera topics and exit.")
+@pass_ctx
+def video_cmd(c: Ctx, bags, topics, tile, output, output_dir, start, end, height, parallel, list_only) -> None:
+    """Write camera topics of BAGS to MP4 files (needs ffmpeg).
+
+    Videos run on the bag's clock (gaps repeat the previous frame). Several
+    bags give one video each, e.g. `bagarium video --tile -O videos -j 3 $(bagarium ls -t outdoor --paths)`.
+    """
+    rows = list({r["id"]: r for r in (c.bag(b) for b in bags)}.values())
+    if list_only:
+        for r in rows:
+            for cam in video.camera_topics(catalog.topics_of(c.conn, r["id"])):
+                click.echo((f"{r['path']}\t" if len(rows) > 1 else "") + f"{cam['name']}\t{cam['type']}\t{cam['message_count']}")
+        return
+    if output and len(rows) > 1:
+        raise click.UsageError("--output takes a single BAG; use --output-dir for several")
+    if len(topics) > 1 and not tile:
+        raise click.UsageError("several --topic need --tile")
+    try:
+        video.ffmpeg_path()
+    except video.VideoError as e:
+        raise click.ClickException(str(e))
+
+    plans, problems, taken = [], [], set()
+    for r in rows:
+        if len(rows) > 1 and catalog.broken_reason(r):
+            problems.append((r, catalog.broken_reason(r)))
+            continue
+        try:
+            plans.append(_video_plan(c, r, topics, tile, output, output_dir, start, end, taken))
+        except click.ClickException as e:
+            problems.append((r, e.message))
+    if len(rows) == 1 and problems:
+        raise click.ClickException(problems[0][1])
+    for r, message in problems:
+        click.secho(f"   skipped  {r['path']}: {message}", fg="yellow")
+
+    def encode(plan) -> None:
+        r, chosen, out, start_ns, end_ns = plan
+        if tile:
+            video.make_tiled_video(r["path"], chosen, out, r["start_ns"], r["end_ns"], start_ns, end_ns, height or None)
+        else:
+            cam = chosen[0]
+            video.make_video(r["path"], cam["name"], cam["type"], out, r["start_ns"], r["end_ns"],
+                             cam["message_count"], start_ns, end_ns, height or None)
+
+    failed = 0
+    if len(plans) == 1:
+        r, chosen, out, start_ns, end_ns = plans[0]
+        label = f"encoding {len(chosen)} cameras" if tile else f"encoding {chosen[0]['name']}"
+        with click.progressbar(length=1000, label=label, show_percent=True) as bar:
+            def on_progress(frac: float) -> None:
+                bar.update(round(frac * 1000) - bar.pos)
+
+            try:
+                if tile:
+                    video.make_tiled_video(r["path"], chosen, out, r["start_ns"], r["end_ns"], start_ns, end_ns,
+                                           height or None, on_progress)
+                else:
+                    cam = chosen[0]
+                    video.make_video(r["path"], cam["name"], cam["type"], out, r["start_ns"], r["end_ns"],
+                                     cam["message_count"], start_ns, end_ns, height or None, on_progress)
+            except video.VideoError as e:
+                raise click.ClickException(str(e))
+        click.echo(f"wrote {out} ({fmt.size(out.stat().st_size)})")
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max(1, parallel)) as pool:
+            futures = {pool.submit(encode, plan): plan for plan in plans}
+            for future in as_completed(futures):
+                r, _, out, _, _ = futures[future]
+                try:
+                    future.result()
+                    click.echo(f"{click.style('     wrote', fg='green')}  {out} ({fmt.size(out.stat().st_size)})")
+                except Exception as e:
+                    failed += 1
+                    click.secho(f"    failed  {r['path']}: {e}", fg="red")
+        click.echo(f"wrote {len(plans) - failed}, skipped {len(problems)}, failed {failed}")
+    if failed:
+        raise SystemExit(1)
+
+
+def _video_plan(c: Ctx, r, topics, tile, output, output_dir, start, end, taken: set):
+    """(bag, cameras, output path, start_ns, end_ns) for one bag, or ClickException.
+
+    Output names already used by earlier bags of the batch (``taken``) get ``_2``, ``_3``...
+    """
+    cams = video.camera_topics(catalog.topics_of(c.conn, r["id"]))
+    if not cams:
+        raise click.ClickException("this bag has no camera topic")
+    by_name = {cam["name"]: cam for cam in cams}
+    unknown = [t for t in topics if t not in by_name]
+    if unknown:
+        raise click.ClickException(f"no camera topic {unknown[0]!r}; see --list")
+    if tile:
+        chosen = [by_name[t] for t in topics] if topics else [by_name[n] for n in video.view_order(by_name)]
+    else:
+        chosen = [by_name[topics[0]]] if topics else [cams[0]]
+    try:
+        start_ns = extract.parse_bag_time(start, r["start_ns"]) if start else None
+        end_ns = extract.parse_bag_time(end, r["start_ns"]) if end else None
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    stem = Path(r["path"]).stem if Path(r["path"]).suffix else r["name"]
+    suffix = "tiled" if tile else video.short_name(chosen[0]["name"]).replace("/", "_")
+    out = output or (output_dir or Path(".")) / f"{stem}_{suffix}.mp4"
+    n = 2
+    while out in taken and not output:
+        out = out.with_name(f"{stem}_{suffix}_{n}.mp4")
+        n += 1
+    if out.exists():
+        raise click.ClickException(f"output already exists: {out}")
+    taken.add(out)
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    return r, chosen, out, start_ns, end_ns
 
 
 @main.command()

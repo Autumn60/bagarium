@@ -22,7 +22,7 @@
         <td>
           <a href="/bags/{{ b.id }}">{{ b.name }}</a>
           {% if b.missing %}<span class="badge warn">missing</span>{% endif %}
-          {% if b.error %}<span class="badge err">error</span>{% endif %}
+          {% if b.problem %}<span class="badge err" title="{{ b.problem }}">broken</span>{% elif b.error %}<span class="badge err" title="{{ b.error }}">error</span>{% endif %}
           <div class="note-preview">{{ b.path }}</div>
         </td>
         <td class="num">{{ duration(b.start_ns, b.end_ns) }}</td>

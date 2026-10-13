@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS bags (
     note          TEXT    NOT NULL DEFAULT '',
     missing       INTEGER NOT NULL DEFAULT 0,
     error         TEXT,
-    indexed_at    TEXT    NOT NULL
+    indexed_at    TEXT    NOT NULL,
+    problem       TEXT,               -- integrity problem of the data files (truncated, missing...)
+    checked_mtime REAL                -- bag mtime the integrity check was done for
 );
 CREATE INDEX IF NOT EXISTS idx_bags_start ON bags(start_ns);
 
@@ -103,7 +105,14 @@ CREATE VIEW IF NOT EXISTS topics AS
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Move catalogs created before topic names were normalized to the new tables."""
+    """Bring catalogs made by earlier versions up to date."""
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(bags)")}
+    for column, decl in (("problem", "TEXT"), ("checked_mtime", "REAL")):
+        if column not in columns:  # never checked: the next scan re-reads and checks these bags
+            conn.execute(f"ALTER TABLE bags ADD COLUMN {column} {decl}")
+    conn.commit()
+
+    # topic names normalized into topic_names / bag_topics
     row = conn.execute("SELECT type FROM sqlite_master WHERE name = 'topics'").fetchone()
     if row is None or row["type"] != "table":
         return

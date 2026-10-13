@@ -1,7 +1,14 @@
-"""In-memory job queue for the web UI: jobs run one after another in a worker thread."""
+"""In-memory job queue for the web UI.
+
+Jobs run in lanes: each lane has its own worker threads and runs its jobs in
+order. File operations (scan, extract, move, import) share the "main" lane and
+run one at a time; video encoding has its own lane so it neither blocks them
+nor waits for them, and runs a few jobs in parallel.
+"""
 
 from __future__ import annotations
 
+import os
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +17,11 @@ from typing import Callable, Iterable
 MAX_ERRORS = 50
 MAX_HISTORY = 50
 ACTIVE = ("queued", "running")
+
+
+def default_lanes() -> dict[str, int]:
+    video = os.environ.get("BAGARIUM_VIDEO_WORKERS")
+    return {"main": 1, "video": int(video) if video else max(1, min(3, (os.cpu_count() or 4) // 4))}
 
 
 class Cancelled(Exception):
@@ -61,27 +73,34 @@ class Job:
 
 
 class JobQueue:
-    def __init__(self) -> None:
+    def __init__(self, lanes: dict[str, int] | None = None) -> None:
         self._lock = threading.Lock()
         self._wakeup = threading.Condition(self._lock)
         self._jobs: dict[int, Job] = {}
         self._next_id = 1
-        self._worker: threading.Thread | None = None
+        self.lanes = lanes or default_lanes()
+        self._workers: dict[str, list[threading.Thread]] = {}
 
     # ------------------------------------------------------------ submitting
 
     def submit(self, kind: str, label: str, target: Callable[[Job], dict | None],
-               reserved: Iterable[Path] = (), **info) -> int:
-        """Queue a job. ``reserved`` are output paths it will create (see ``reserved_outputs``)."""
+               reserved: Iterable[Path] = (), lane: str = "main", **info) -> int:
+        """Queue a job in ``lane``. ``reserved`` are output paths it will create (see ``reserved_outputs``)."""
+        if lane not in self.lanes:
+            raise ValueError(f"unknown lane: {lane}")
         with self._lock:
-            job = Job(self, self._next_id, kind, label, target, reserved, info)
+            job = Job(self, self._next_id, kind, label, target, reserved, {**info, "lane": lane})
             self._jobs[job.id] = job
             self._next_id += 1
             self._trim_history()
-            if self._worker is None:
-                self._worker = threading.Thread(target=self._work, name="bagarium-jobs", daemon=True)
-                self._worker.start()
-            self._wakeup.notify()
+            if lane not in self._workers:
+                self._workers[lane] = [
+                    threading.Thread(target=self._work, args=(lane,), name=f"bagarium-{lane}-{n}", daemon=True)
+                    for n in range(self.lanes[lane])
+                ]
+                for worker in self._workers[lane]:
+                    worker.start()
+            self._wakeup.notify_all()
             return job.id
 
     def cancel(self, job_id: int) -> bool:
@@ -140,10 +159,10 @@ class JobQueue:
 
     # ------------------------------------------------------------ worker
 
-    def _work(self) -> None:
+    def _work(self, lane: str) -> None:
         while True:
             with self._lock:
-                while (job := self._next_queued()) is None:
+                while (job := self._next_queued(lane)) is None:
                     self._wakeup.wait()
                 job.state.update(state="running", started_at=_now())
             state, extra = "completed", {}
@@ -156,8 +175,9 @@ class JobQueue:
             with self._lock:
                 job.state.update(state=state, cancelling=False, current=None, finished_at=_now(), **extra)
 
-    def _next_queued(self) -> Job | None:
-        return next((j for j in self._jobs.values() if j.state["state"] == "queued"), None)
+    def _next_queued(self, lane: str) -> Job | None:
+        return next((j for j in self._jobs.values()
+                     if j.state["state"] == "queued" and j.state["lane"] == lane), None)
 
     def _trim_history(self) -> None:
         finished = [i for i, j in self._jobs.items() if j.state["state"] not in ACTIVE]

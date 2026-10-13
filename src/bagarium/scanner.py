@@ -193,3 +193,123 @@ def _read_db3(path: Path) -> BagInfo:
         conn.close()
     topics = [TopicInfo(name, type_, n) for name, type_, n in rows]
     return BagInfo(path, "sqlite3", 0, 0.0, start, end, total, topics)
+
+
+# ---------------------------------------------------------------- integrity
+
+SQLITE_MAGIC = b"SQLite format 3\x00"
+MCAP_MAGIC = b"\x89MCAP0\r\n"
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+def data_files(path: Path) -> list[Path]:
+    """Data files a bag consists of: the file itself, or those listed in metadata.yaml."""
+    path = Path(path)
+    if path.is_file():
+        return [path]
+    with open(path / METADATA_FILE, encoding="utf-8") as f:
+        meta = (yaml.load(f, Loader=YAML_LOADER) or {}).get("rosbag2_bagfile_information") or {}
+    return [path / p for p in meta.get("relative_file_paths") or []]
+
+
+def check_files(path: Path) -> str | None:
+    """Cheap integrity check of a bag's data files (reads only a few bytes of each).
+
+    Returns a description of the first problem found, or None. Catches missing
+    files, truncated sqlite3 files (shorter than their header says), mcap files
+    that were not written to the end, and truncated zstd files (by walking the
+    block headers, without decompressing).
+    """
+    try:
+        files = data_files(path)
+    except Exception as e:
+        return f"cannot read {METADATA_FILE}: {type(e).__name__}"
+    if not files:
+        return "no data files"
+    for f in files:
+        problem = _check_file(f)
+        if problem:
+            return f"{f.name}: {problem}" if Path(path).is_dir() else problem
+    return None
+
+
+def _check_file(f: Path) -> str | None:
+    try:
+        size = f.stat().st_size
+        with open(f, "rb") as fh:
+            head = fh.read(100)
+            if f.suffix == ".mcap":
+                fh.seek(max(0, size - len(MCAP_MAGIC)))
+                tail = fh.read(len(MCAP_MAGIC))
+    except FileNotFoundError:
+        return "missing"
+    except OSError as e:
+        return f"unreadable ({e.strerror})"
+    if f.name.endswith(".zstd"):
+        if len(head) < len(ZSTD_MAGIC) and ZSTD_MAGIC.startswith(head):
+            return f"truncated ({size:,} bytes)"
+        if not head.startswith(ZSTD_MAGIC):
+            return "not zstd data"
+        return _check_zstd(f, size)
+    if f.suffix == ".mcap":
+        if not head.startswith(MCAP_MAGIC):
+            return "not an mcap file"
+        if tail != MCAP_MAGIC:
+            return "incomplete (the file does not end properly; recording or copy was interrupted)"
+        return None
+    if f.suffix == ".db3":
+        if len(head) < 100 or not head.startswith(SQLITE_MAGIC):
+            return "not an sqlite3 file"
+        page_size = int.from_bytes(head[16:18], "big")
+        page_size = 65536 if page_size == 1 else page_size
+        pages = int.from_bytes(head[28:32], "big")
+        counter, valid_for = head[24:28], head[92:96]
+        expected = pages * page_size
+        # the in-header page count is only reliable when it matches the change counter
+        if counter == valid_for and pages and size < expected:
+            return f"truncated ({size:,} of {expected:,} bytes)"
+        return None
+    return None
+
+
+def _check_zstd(f: Path, size: int) -> str | None:
+    """Walk zstd frames block by block (headers only) and report a truncated file."""
+    with open(f, "rb") as fh:
+        pos = 0
+        while pos < size:
+            fh.seek(pos)
+            magic = fh.read(4)
+            if len(magic) < 4:
+                return f"truncated ({size:,} bytes, ends inside a frame header)"
+            number = int.from_bytes(magic, "little")
+            if 0x184D2A50 <= number <= 0x184D2A5F:  # skippable frame
+                length = int.from_bytes(fh.read(4), "little")
+                pos += 8 + length
+                continue
+            if magic != ZSTD_MAGIC:
+                return f"unexpected data at byte {pos:,}"
+            descriptor = fh.read(1)
+            if not descriptor:
+                return f"truncated ({size:,} bytes, ends inside a frame header)"
+            d = descriptor[0]
+            single_segment = d >> 5 & 1
+            fcs_size = [1 if single_segment else 0, 2, 4, 8][d >> 6]
+            header = 4 + 1 + (0 if single_segment else 1) + [0, 1, 2, 4][d & 3] + fcs_size
+            pos += header
+            while True:
+                fh.seek(pos)
+                block = fh.read(3)
+                if len(block) < 3:
+                    return f"truncated ({size:,} bytes, the last block is missing)"
+                value = int.from_bytes(block, "little")
+                last, block_type, block_size = value & 1, value >> 1 & 3, value >> 3
+                pos += 3 + (1 if block_type == 1 else block_size)  # RLE blocks store a single byte
+                if pos > size:
+                    return f"truncated ({size:,} of at least {pos:,} bytes)"
+                if last:
+                    break
+            if d >> 2 & 1:  # content checksum
+                pos += 4
+                if pos > size:
+                    return f"truncated ({size:,} bytes, checksum missing)"
+    return None

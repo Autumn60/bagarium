@@ -8,11 +8,11 @@ from typing import Iterator
 from urllib.parse import urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .. import __version__, catalog, db, extract, fileops, fmt, importer, move, track
+from .. import __version__, catalog, db, extract, fileops, fmt, importer, move, track, video
 from .jobs import MAX_ERRORS, Job, JobQueue
 
 HERE = Path(__file__).parent
@@ -53,7 +53,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             raise HTTPException(404, "bag not found")
         return row
 
-    def run_search(conn, q, tag, topic, type_, since, until, missing, root=""):
+    def run_search(conn, q, tag, topic, type_, since, until, missing, root="", broken=False):
         errors = []
 
         def parse(value: str, end: bool):
@@ -67,7 +67,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
 
         rows = catalog.search(
             conn, q, tag, [t for t in [topic] if t], [t for t in [type_] if t],
-            parse(since, False), parse(until, True), missing, root=root or None,
+            parse(since, False), parse(until, True), missing, root=root or None, broken=broken,
         )
         return rows, errors
 
@@ -84,13 +84,14 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         until: str = "",
         missing: bool = False,
         root: str = "",
+        broken: bool = False,
         page: int = Query(1, ge=1),
         conn: sqlite3.Connection = Depends(get_conn),
     ):
         tag = [t for t in tag if t]
-        rows, errors = run_search(conn, q, tag, topic, type, since, until, missing, root)
+        rows, errors = run_search(conn, q, tag, topic, type, since, until, missing, root, broken)
         params = {"q": q, "tag": tag, "topic": topic, "type": type, "since": since, "until": until,
-                  "missing": missing, "root": root}
+                  "missing": missing, "root": root, "broken": broken}
 
         def with_tags(new_tags: list[str]) -> str:
             p = {k: v for k, v in params.items() if v and k != "tag"}
@@ -131,11 +132,14 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         tag = [t for t in tag if t]
         rows, errors = run_search(conn, q, tag, topic, type, since, until, False, root)
         with_track = [r for r in rows if track.candidates(catalog.topics_of(conn, r["id"]))]
+        skipped = [r for r in with_track if catalog.broken_reason(r)]
+        with_track = [r for r in with_track if not catalog.broken_reason(r)]
         limited = len(with_track) > MAP_LIMIT
         with_track = with_track[:MAP_LIMIT]
         params = {"q": q, "tag": tag, "topic": topic, "type": type, "since": since, "until": until, "root": root}
         return templates.TemplateResponse(request, "map.html", {
             "bags": with_track, "total": len(rows), "errors": errors, "limited": limited, "map_limit": MAP_LIMIT,
+            "skipped": skipped,
             "list_url": "/?" + urlencode({k: v for k, v in params.items() if v}, doseq=True),
         })
 
@@ -152,6 +156,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             "error": error,
             "default_output": extract.default_output_path(Path(bag["path"])),
             "track_topics": track.candidates(catalog.topics_of(conn, bag_id)),
+            "cameras": camera_list(bag, conn),
         })
 
     @app.post("/bags/{bag_id}/note", dependencies=[Depends(same_origin)])
@@ -544,13 +549,195 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         until: str = "",
         missing: bool = False,
         root: str = "",
+        broken: bool = False,
         conn: sqlite3.Connection = Depends(get_conn),
     ):
-        rows, errors = run_search(conn, q, tag, topic, type, since, until, missing, root)
+        rows, errors = run_search(conn, q, tag, topic, type, since, until, missing, root, broken)
         if errors:
             raise HTTPException(400, "; ".join(errors))
         tag_map = catalog.tags_of(conn, (r["id"] for r in rows))
         return [{**dict(r), "missing": bool(r["missing"]), "tags": tag_map[r["id"]]} for r in rows]
+
+    # ------------------------------------------------------------ cameras
+
+    def camera_list(bag: sqlite3.Row, conn: sqlite3.Connection) -> list[dict]:
+        """Camera topics in view order, plus an "all cameras" entry when there are several."""
+        active = {(j.get("bag_id"), j.get("topic")): j for j in jobs.list()
+                  if j["kind"] == "video" and j["state"] in ("queued", "running")}
+        cams = video.camera_topics(catalog.topics_of(conn, bag["id"]))
+        order = video.view_order([c["name"] for c in cams])
+        cams.sort(key=lambda c: order.index(c["name"]))
+        entries = [{
+            **c, "label": video.short_name(c["name"]),
+            "has_preview": video.preview_path(bag, c["name"]).exists(),
+            "job": active.get((bag["id"], c["name"])),
+        } for c in cams]
+        if len(cams) > 1:
+            entries.insert(0, {
+                "name": video.ALL_CAMERAS, "label": f"all ({len(cams)})", "all": True,
+                "has_preview": video.preview_path(bag, video.ALL_CAMERAS).exists(),
+                "job": active.get((bag["id"], video.ALL_CAMERAS)),
+            })
+        return entries
+
+    def find_cameras(conn: sqlite3.Connection, bag_id: int, topic: str) -> tuple[sqlite3.Row, list[dict]]:
+        """The bag and the camera topics ``topic`` stands for (every camera for ALL_CAMERAS)."""
+        bag = load_bag(conn, bag_id)
+        cams = video.camera_topics(catalog.topics_of(conn, bag_id))
+        if topic != video.ALL_CAMERAS:
+            cams = [c for c in cams if c["name"] == topic]
+        if not cams:
+            raise HTTPException(404, f"no camera topic {topic!r} in this bag")
+        if bag["missing"]:
+            raise HTTPException(409, "bag files not found")
+        return bag, cams
+
+    @app.get("/bags/{bag_id}/thumbnail")
+    def camera_thumbnail(bag_id: int, topic: str, conn: sqlite3.Connection = Depends(get_conn)):
+        if topic == video.ALL_CAMERAS:
+            raise HTTPException(404, "no single thumbnail for all cameras")
+        bag, [cam] = find_cameras(conn, bag_id, topic)
+        try:
+            data, media = video.cached_thumbnail(bag, cam["name"], cam["type"])
+        except Exception as e:  # unreadable data or unsupported format
+            raise HTTPException(422, f"could not read a frame: {type(e).__name__}: {e}")
+        return Response(data, media_type=media, headers={"Cache-Control": "max-age=3600"})
+
+    @app.get("/bags/{bag_id}/video")
+    def camera_video(bag_id: int, topic: str, download: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
+        bag, _ = find_cameras(conn, bag_id, topic)
+        path = video.preview_path(bag, topic)
+        if not path.exists():
+            raise HTTPException(404, "no preview yet")
+        if download:
+            return FileResponse(path, media_type="video/mp4", filename=video.download_name(bag, topic))
+        return FileResponse(path, media_type="video/mp4")
+
+    def submit_preview(bag: sqlite3.Row, topic: str, cams: list[dict]) -> bool:
+        """Queue a preview video job (in the video lane) unless it exists or is already queued."""
+        out = video.preview_path(bag, topic)
+        if out.exists() or out in jobs.reserved_outputs():
+            return False
+        bag_dict = dict(bag)
+        tiled = topic == video.ALL_CAMERAS
+
+        def run(j: Job) -> dict:
+            j.update(total=1000, current=f"{bag_dict['name']} · {'all cameras' if tiled else topic}")
+
+            def on_progress(frac: float) -> None:
+                j.update(done=round(frac * 1000))
+                j.check_cancelled()
+
+            if tiled:
+                path = video.make_tiled_preview(bag_dict, cams, on_progress)
+            else:
+                path = video.make_preview(bag_dict, topic, cams[0]["type"], cams[0]["message_count"], on_progress)
+            j.set_stats(MB=round(path.stat().st_size / 1e6))
+            return {}
+
+        what = "all cameras" if tiled else video.short_name(topic)
+        jobs.submit("video", f"Preview {what} of {bag['name']}", run,
+                    reserved=[out], lane="video", bag_id=bag["id"], topic=topic)
+        return True
+
+    @app.post("/bags/{bag_id}/video", dependencies=[Depends(same_origin)])
+    def queue_video(bag_id: int, topic: str = Form(...), conn: sqlite3.Connection = Depends(get_conn)):
+        bag, cams = find_cameras(conn, bag_id, topic)
+        try:
+            video.ffmpeg_path()
+        except video.VideoError as e:
+            return redirect(f"/bags/{bag_id}", str(e))
+        submit_preview(bag, topic, cams)
+        return RedirectResponse(f"/bags/{bag_id}#cameras", status_code=303)
+
+    @app.get("/videos", response_class=HTMLResponse)
+    def videos_page(request: Request, bag: list[int] = Query(default=[]), error: str = "",
+                    conn: sqlite3.Connection = Depends(get_conn)):
+        bags = load_bags(conn, bag)
+        rows, topics = [], {}
+        ready_total = 0
+        for b in bags:
+            cams = video.camera_topics(catalog.topics_of(conn, b["id"]))
+            for c in cams:
+                topics.setdefault(c["name"], 0)
+                topics[c["name"]] += 1
+            names = ([video.ALL_CAMERAS] if len(cams) > 1 else []) + video.view_order([c["name"] for c in cams])
+            ready = [n for n in names if video.preview_path(b, n).exists()]
+            ready_total += len(ready)
+            rows.append({
+                "bag": b, "cameras": [video.short_name(c["name"]) for c in cams],
+                "ready": ["all" if n == video.ALL_CAMERAS else video.short_name(n) for n in ready],
+            })
+        order = video.view_order(topics)
+        return templates.TemplateResponse(request, "videos.html", {
+            "rows": rows, "error": error, "ALL": video.ALL_CAMERAS, "ready_total": ready_total,
+            "topics": [{"name": t, "label": video.short_name(t), "count": topics[t]} for t in order],
+            "workers": jobs.lanes["video"],
+        })
+
+    @app.get("/videos/download")
+    def download_videos(bag: list[int] = Query(default=[]), what: str = "ready",
+                        conn: sqlite3.Connection = Depends(get_conn)):
+        """Existing preview videos of the bags as one zip (``what``: ready / * / each / a topic)."""
+        files, used = [], set()
+        for b in load_bags(conn, bag):
+            cams = video.camera_topics(catalog.topics_of(conn, b["id"]))
+            names = [c["name"] for c in cams]
+            if what == "ready":
+                wanted = [video.ALL_CAMERAS] + names
+            elif what == "each":
+                wanted = names
+            elif what == video.ALL_CAMERAS:
+                wanted = [video.ALL_CAMERAS] if len(cams) > 1 else names
+            else:
+                wanted = [what] if what in names else []
+            for topic in wanted:
+                path = video.preview_path(b, topic)
+                if not path.exists():
+                    continue
+                name = video.download_name(b, topic)
+                n = 2
+                while name in used:  # bags with the same name
+                    name = video.download_name(b, topic).removesuffix(".mp4") + f"_{n}.mp4"
+                    n += 1
+                used.add(name)
+                files.append((path, name))
+        if not files:
+            back = "/videos?" + urlencode({"bag": bag}, doseq=True)
+            return redirect(back, "none of the selected previews have been made yet")
+        from datetime import datetime
+
+        filename = f"bagarium-previews-{datetime.now():%Y%m%d-%H%M%S}.zip"
+        return StreamingResponse(video.zip_stream(files), media_type="application/zip",
+                                 headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+    @app.post("/videos", dependencies=[Depends(same_origin)])
+    def queue_videos(bag: list[int] = Form(default=[]), what: str = Form(video.ALL_CAMERAS),
+                     conn: sqlite3.Connection = Depends(get_conn)):
+        back = "/videos?" + urlencode({"bag": bag}, doseq=True)
+        try:
+            video.ffmpeg_path()
+        except video.VideoError as e:
+            return redirect(back, str(e))
+        queued = 0
+        for b in load_bags(conn, bag):
+            if b["missing"] or catalog.broken_reason(b):
+                continue
+            cams = video.camera_topics(catalog.topics_of(conn, b["id"]))
+            if what == "each":
+                queued += sum(submit_preview(b, c["name"], [c]) for c in cams)
+            elif what == video.ALL_CAMERAS:
+                if len(cams) > 1:
+                    queued += submit_preview(b, video.ALL_CAMERAS, cams)
+                elif cams:
+                    queued += submit_preview(b, cams[0]["name"], cams)
+            else:
+                chosen = [c for c in cams if c["name"] == what]
+                if chosen:
+                    queued += submit_preview(b, what, chosen)
+        if not queued:
+            return redirect(back, "nothing to do: the previews exist or are queued, or the bags have no such camera")
+        return redirect("/jobs")
 
     @app.get("/api/bags/{bag_id}/track")
     def api_track(bag_id: int, topic: str = "", conn: sqlite3.Connection = Depends(get_conn)):

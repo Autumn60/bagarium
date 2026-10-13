@@ -36,6 +36,9 @@ def plan_import(
 ) -> list[ImportItem]:
     """List the bags under ``src`` and decide where each goes under ``dest``.
 
+    Bags whose data files fail the integrity check are skipped (unless ``src``
+    is that single bag).
+
     ``include`` / ``exclude`` are glob patterns matched against each bag's path
     relative to ``src`` (e.g. ``2026-09-*/*``); bags not selected are left out.
     """
@@ -52,6 +55,7 @@ def plan_import(
     base = src.parent if src.is_file() or (src / scanner.METADATA_FILE).is_file() else src
     taken = set(taken)
     include, exclude = list(include), list(exclude)
+    single = src.is_file() or (src / scanner.METADATA_FILE).is_file()
     items = []
     for bag in scanner.discover(src):
         rel = bag.relative_to(base).as_posix()
@@ -61,7 +65,9 @@ def plan_import(
         target = dest / bag.relative_to(base)
         item = ImportItem(bag, target, sum(f.stat().st_size for f in fileops.bag_files(bag, recursive=False)))
         items.append(item)
-        item.message = _skip_reason(conn, item, taken) or ""
+        # damaged sources are not copied, unless that one bag was asked for explicitly
+        problem = None if single else scanner.check_files(bag)
+        item.message = f"broken: {problem}" if problem else (_skip_reason(conn, item, taken) or "")
         if item.message:
             item.status = "skipped"
         else:

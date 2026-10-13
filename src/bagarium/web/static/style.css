@@ -12,6 +12,7 @@
   }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--fg);
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; }
 a { color: var(--accent); text-decoration: none; }
@@ -132,3 +133,13 @@ div.extract label.wide input[type=text] { flex: 1; }
 .swatch { display: inline-block; width: 14px; height: 4px; border-radius: 2px; background: var(--muted); }
 
 .pager { display: flex; gap: 16px; justify-content: center; align-items: center; margin: 12px 0; }
+
+.cameras { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin-bottom: 10px; }
+button.camera { display: flex; flex-direction: column; gap: 4px; padding: 6px; background: var(--card); color: var(--fg);
+  border: 2px solid var(--border); border-radius: 8px; text-align: left; }
+button.camera img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 4px; background: var(--border); }
+button.camera.selected { border-color: var(--accent); }
+#camera-video { width: 100%; max-height: 70vh; background: #000; border-radius: 8px; }
+.mosaic { display: grid; grid-template-columns: repeat(2, 1fr); gap: 2px; width: 100%; aspect-ratio: 16 / 9;
+  border-radius: 4px; overflow: hidden; background: var(--border); }
+.mosaic img { width: 100%; height: 100%; object-fit: cover; }

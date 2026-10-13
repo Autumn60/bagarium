@@ -5,7 +5,7 @@
 <p><a href="/">← all bags</a></p>
 <h1>{{ bag.name }}
   {% if bag.missing %}<span class="badge warn">missing</span>{% endif %}
-  {% if bag.error %}<span class="badge err">error</span>{% endif %}
+  {% if bag.problem %}<span class="badge err" title="{{ bag.problem }}">broken</span>{% elif bag.error %}<span class="badge err" title="{{ bag.error }}">error</span>{% endif %}
 </h1>
 
 {% if error %}<p class="flash error">{{ error }}</p>{% endif %}
@@ -21,6 +21,8 @@
   <dt>Messages</dt><dd>{{ bag.message_count | count }}</dd>
   <dt>Indexed</dt><dd>{{ bag.indexed_at }}</dd>
   {% if bag.error %}<dt>Error</dt><dd class="error">{{ bag.error }}</dd>{% endif %}
+  {% if bag.problem %}<dt>Problem</dt><dd class="error">{{ bag.problem }}<br>
+    <span class="muted">The data files are damaged. Batch operations skip this bag; single operations may fail or read only part of it.</span></dd>{% endif %}
 </dl>
 
 <section>
@@ -61,6 +63,37 @@
     <button type="submit">Save note</button>
   </form>
 </section>
+
+{% if cameras and not bag.missing %}
+<section id="cameras">
+  <h2>Cameras <span class="muted">({{ cameras | rejectattr("all") | list | length }})</span></h2>
+  <div class="cameras">
+    {% for c in cameras %}
+    <button type="button" class="camera{{ ' all' if c.all }}" title="{{ 'every camera side by side' if c.all else c.name }}"
+            data-topic="{{ c.name }}" data-label="{{ c.label }}"
+            data-preview="{{ 'true' if c.has_preview else '' }}" data-job="{{ c.job.state if c.job else '' }}">
+      {% if c.all %}
+      <span class="mosaic">
+        {% for x in cameras if not x.all %}<img loading="lazy" alt="" src="/bags/{{ bag.id }}/thumbnail?topic={{ x.name | urlencode }}">{% endfor %}
+      </span>
+      {% else %}
+      <img loading="lazy" alt="{{ c.label }}" src="/bags/{{ bag.id }}/thumbnail?topic={{ c.name | urlencode }}"
+           onerror="this.replaceWith(Object.assign(document.createElement('span'), {className: 'muted', textContent: 'no image'}))">
+      {% endif %}
+      <span>{{ c.label }}</span>
+    </button>
+    {% endfor %}
+  </div>
+  <video id="camera-video" controls preload="metadata" hidden></video>
+  <p class="hint" id="video-download" hidden><a href="#">Download this video</a></p>
+  <form method="post" action="/bags/{{ bag.id }}/video" id="video-form" class="row" hidden>
+    <input type="hidden" name="topic">
+    <span class="muted" id="video-hint" style="flex: 1"></span>
+    <button type="submit">Make preview video</button>
+  </form>
+  <p class="muted hint" id="video-status" hidden></p>
+</section>
+{% endif %}
 
 {% if track_topics and not bag.missing %}
 <section>
@@ -137,6 +170,54 @@
 </script>
 <script src="/static/topic-select.js"></script>
 <script src="/static/jobs.js"></script>
+{% if cameras and not bag.missing %}
+<script>
+  (() => {
+    const KEY = "bagarium.camera";
+    const cams = [...document.querySelectorAll("button.camera")];
+    const player = document.getElementById("camera-video");
+    const form = document.getElementById("video-form");
+    const status = document.getElementById("video-status");
+    const select = btn => {
+      cams.forEach(c => c.classList.toggle("selected", c === btn));
+      try { localStorage.setItem(KEY, btn.dataset.topic); } catch {}
+      const topic = btn.dataset.topic;
+      player.hidden = form.hidden = status.hidden = document.getElementById("video-download").hidden = true;
+      if (btn.dataset.preview) {
+        const src = `/bags/{{ bag.id }}/video?topic=${encodeURIComponent(topic)}`;
+        if (player.getAttribute("src") !== src) player.src = src;
+        player.hidden = false;
+        const dl = document.getElementById("video-download");
+        dl.querySelector("a").href = src + "&download=1";
+        dl.hidden = false;
+      } else {
+        player.pause();
+        player.removeAttribute("src");
+        if (btn.dataset.job) {
+          status.textContent = `The preview of ${btn.dataset.label} is ${btn.dataset.job}; this page updates when it is ready.`;
+          status.hidden = false;
+        } else {
+          form.elements.topic.value = topic;
+          document.getElementById("video-hint").textContent = topic === "*"
+            ? "No side-by-side preview yet. Each camera's preview is made first if needed, then they are tiled."
+            : `No preview of ${btn.dataset.label} yet. It is encoded in the background (about 10–20 s per minute of recording).`;
+          form.hidden = false;
+        }
+      }
+    };
+    cams.forEach(c => c.addEventListener("click", () => select(c)));
+    let stored = null;
+    try { stored = localStorage.getItem(KEY); } catch {}
+    select(cams.find(c => c.dataset.topic === stored) || cams.find(c => c.dataset.topic !== "*") || cams[0]);
+    player.addEventListener("timeupdate", () => window.bagariumShowTime?.(player.currentTime));
+    window.bagariumSeekVideo = sec => {
+      player.currentTime = sec;
+      player.play();
+      player.scrollIntoView({ behavior: "smooth", block: "center" });
+    };
+  })();
+</script>
+{% endif %}
 {% if track_topics and not bag.missing %}
 {% include "_leaflet.html" %}
 <script>
@@ -156,9 +237,24 @@
     };
     const popup = (p, t) => {
       const sec = p[2].toFixed(1);
-      return `<strong>+${sec} s</strong> · ${M.clock(t.start_ns, p[2])}` + (form
-        ? `<div class="popup-actions"><button onclick="bagariumUseTime('start', '${sec}')">Use as start</button>`
-          + `<button onclick="bagariumUseTime('end', '${sec}')">Use as end</button></div>` : "");
+      const videoShown = window.bagariumSeekVideo && !document.getElementById("camera-video").hidden;
+      const actions = [
+        videoShown ? `<button onclick="bagariumSeekVideo(${sec}); map.closePopup()">Play video here</button>` : "",
+        form ? `<button onclick="bagariumUseTime('start', '${sec}')">Use as start</button>` : "",
+        form ? `<button onclick="bagariumUseTime('end', '${sec}')">Use as end</button>` : "",
+      ].join("");
+      return `<strong>+${sec} s</strong> · ${M.clock(t.start_ns, p[2])}`
+        + (actions ? `<div class="popup-actions">${actions}</div>` : "");
+    };
+    // current position marker, driven by the camera video
+    const here = L.circleMarker([0, 0], { radius: 7, color: "#fff", weight: 2, fillColor: "#1f6feb", fillOpacity: 1 });
+    let current = null;
+    window.bagariumShowTime = sec => {
+      if (!current || !current.points.length) return;
+      const pts = current.points;
+      let lo = 0, hi = pts.length - 1;  // last point at or before sec
+      while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (pts[mid][2] <= sec) lo = mid; else hi = mid - 1; }
+      here.setLatLng([pts[lo][0], pts[lo][1]]).addTo(map);
     };
     const load = async () => {
       status.textContent = "loading track… (the first time can take a few seconds for large bags)";
@@ -166,6 +262,7 @@
         const t = await M.fetchTrack({{ bag.id }}, select ? select.value : "");
         if (layer) layer.remove();
         layer = M.drawTrack(map, t, { popup });
+        current = t;
         if (t.points.length) map.fitBounds(layer.getBounds(), { padding: [20, 20] });
         status.textContent = t.points.length
           ? `${t.points.length} points from ${t.topic} · click the track for the time at that spot`

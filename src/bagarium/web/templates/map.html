@@ -6,6 +6,9 @@
 {% for e in errors %}<p class="error">{{ e }}</p>{% endfor %}
 {% if limited %}<p class="flash">Showing the first {{ map_limit }} bags with a track; narrow the search to see others.</p>{% endif %}
 
+{% if skipped %}
+<p class="muted">Skipped (broken): {% for b in skipped %}<a href="/bags/{{ b.id }}">{{ b.name }}</a>{{ ", " if not loop.last }}{% endfor %}</p>
+{% endif %}
 {% if bags %}
 <div id="map" class="map tall"></div>
 <p class="muted" id="map-status">loading tracks…</p>

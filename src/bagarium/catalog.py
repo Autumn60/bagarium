@@ -93,8 +93,8 @@ def scan(
                     report(bag_path, check)
                 else:
                     to_read.append(check)
-            for (bag_path, row, size, mtime), info, error in _read_all(to_read, workers):
-                report(bag_path, _store(conn, bag_path, row, size, mtime, info, error, result))
+            for (bag_path, row, size, mtime), info, error, problem in _read_all(to_read, workers):
+                report(bag_path, _store(conn, bag_path, row, size, mtime, info, error, problem, result))
             result.missing += _mark_missing(conn, root, {str(p) for p in found})
             conn.execute("UPDATE roots SET last_scanned_at = ? WHERE path = ?", (_now(), str(root)))
             batch.flush()
@@ -119,28 +119,31 @@ class _CommitBatcher:
 
 def _check(conn: sqlite3.Connection, path: Path, force: bool, result: ScanResult):
     """Cheap pre-check: a status string when done ("unchanged" / "error"), else what to read."""
-    row = conn.execute("SELECT id, size_bytes, mtime, missing, error FROM bags WHERE path = ?", (str(path),)).fetchone()
+    row = conn.execute("SELECT id, size_bytes, mtime, missing, error, checked_mtime FROM bags WHERE path = ?",
+                       (str(path),)).fetchone()
     try:
         size, mtime = scanner.stat_bag(path)
     except OSError as e:
         result.errors.append((path, str(e)))
         return "error"
     if row and not force and not row["missing"] and row["error"] is None \
-            and row["size_bytes"] == size and row["mtime"] == mtime:
+            and row["size_bytes"] == size and row["mtime"] == mtime and row["checked_mtime"] == mtime:
         result.unchanged += 1
         return "unchanged"
     return path, row, size, mtime
 
 
-def _read_one(path: Path) -> tuple[scanner.BagInfo | None, str | None]:
+def _read_one(path: Path) -> tuple[scanner.BagInfo | None, str | None, str | None]:
+    """(metadata, error reading it, integrity problem of the data files)."""
+    problem = scanner.check_files(path)
     try:
-        return scanner.read_bag(path), None
+        return scanner.read_bag(path), None, problem
     except Exception as e:  # corrupt or unsupported bags are still listed
-        return None, f"{type(e).__name__}: {e}"
+        return None, f"{type(e).__name__}: {e}", problem
 
 
 def _read_all(items: list, workers: int | None):
-    """Yield ``(item, info, error)`` for each item, reading bags in parallel when there are many."""
+    """Yield ``(item, info, error, problem)`` for each item, reading bags in parallel when there are many."""
     workers = workers if workers is not None else min(8, os.cpu_count() or 1)
     if workers <= 1 or len(items) < PARALLEL_MIN:
         for item in items:
@@ -156,7 +159,7 @@ def _read_all(items: list, workers: int | None):
         pool.shutdown(wait=True, cancel_futures=True)
 
 
-def _store(conn, path: Path, row, size: int, mtime: float, info, error, result: ScanResult) -> str:
+def _store(conn, path: Path, row, size: int, mtime: float, info, error, problem, result: ScanResult) -> str:
     if info is None:
         info = scanner.BagInfo(path, scanner.storage_of(path), size, mtime)
         result.errors.append((path, error))
@@ -166,7 +169,7 @@ def _store(conn, path: Path, row, size: int, mtime: float, info, error, result: 
         bag_id = _find_moved(conn, info)
         if bag_id is not None:
             status = "moved"
-    _upsert(conn, bag_id, info, error)
+    _upsert(conn, bag_id, info, error, problem)
     setattr(result, status, getattr(result, status) + 1)
     return "error" if error else status
 
@@ -185,22 +188,24 @@ def _find_moved(conn: sqlite3.Connection, info: scanner.BagInfo) -> int | None:
     return None
 
 
-def _upsert(conn: sqlite3.Connection, bag_id: int | None, info: scanner.BagInfo, error: str | None) -> int:
+def _upsert(conn: sqlite3.Connection, bag_id: int | None, info: scanner.BagInfo, error: str | None,
+            problem: str | None = None) -> int:
     values = (
         str(info.path), info.path.name, info.storage, info.start_ns, info.end_ns,
-        info.message_count, info.size_bytes, info.mtime, error, _now(),
+        info.message_count, info.size_bytes, info.mtime, error, _now(), problem, info.mtime,
     )
     if bag_id is None:
         cur = conn.execute(
-            "INSERT INTO bags (path, name, storage, start_ns, end_ns, message_count, size_bytes, mtime, error, indexed_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO bags (path, name, storage, start_ns, end_ns, message_count, size_bytes, mtime, error,"
+            " indexed_at, problem, checked_mtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             values,
         )
         bag_id = cur.lastrowid
     else:
         conn.execute(
             "UPDATE bags SET path = ?, name = ?, storage = ?, start_ns = ?, end_ns = ?, message_count = ?,"
-            " size_bytes = ?, mtime = ?, error = ?, indexed_at = ?, missing = 0 WHERE id = ?",
+            " size_bytes = ?, mtime = ?, error = ?, indexed_at = ?, problem = ?, checked_mtime = ?, missing = 0"
+            " WHERE id = ?",
             (*values, bag_id),
         )
         conn.execute("DELETE FROM bag_topics WHERE bag_id = ?", (bag_id,))
@@ -333,6 +338,7 @@ def search(
     include_missing: bool = False,
     limit: int | None = None,
     root: str | Path | None = None,
+    broken: bool = False,
 ) -> list[sqlite3.Row]:
     """Search bags. All given conditions must hold (AND).
 
@@ -342,6 +348,7 @@ def search(
       (substring, or glob if the pattern contains ``*?[``)
     - ``since`` / ``until``: epoch ns; bag's time range must overlap [since, until)
     - ``root``: bag must be at or under this directory
+    - ``broken``: only bags that could not be read or failed the integrity check
     """
     where: list[str] = []
     params: list[object] = []
@@ -362,6 +369,8 @@ def search(
             where.append("b.id IN (SELECT bt.bag_id FROM bag_topics bt JOIN topic_names tn"
                          f" ON tn.id = bt.topic_id WHERE {clause})")
             params.append(value)
+    if broken:
+        where.append("(b.error IS NOT NULL OR b.problem IS NOT NULL)")
     if root:
         root_s = str(Path(root).expanduser().resolve())
         prefix = root_s.rstrip("/") + "/"
@@ -382,6 +391,18 @@ def search(
         sql += " LIMIT ?"
         params.append(limit)
     return conn.execute(sql, params).fetchall()
+
+
+def broken_reason(bag: sqlite3.Row | dict) -> str | None:
+    """Why a bag cannot be processed (damaged data files or unreadable metadata), or None.
+
+    A damaged file is reported first: it is usually what makes the bag unreadable.
+    """
+    if bag["problem"]:
+        return f"broken: {bag['problem']}"
+    if bag["error"]:
+        return f"unreadable: {bag['error']}"
+    return None
 
 
 def get_bag(conn: sqlite3.Connection, ref: str | int) -> sqlite3.Row | None:

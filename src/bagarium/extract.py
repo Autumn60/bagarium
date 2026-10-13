@@ -394,6 +394,7 @@ def plan_batch(
     suffix: str | None = None,
     output: str | Path | None = None,
     taken: Iterable[Path] = (),
+    skip_broken: bool | None = None,
 ) -> list[BatchItem]:
     """Decide output paths and time ranges for each bag, and which bags to skip.
 
@@ -401,8 +402,13 @@ def plan_batch(
     own start. ``output`` names the exact output and is only valid for one bag;
     otherwise names are made unique within the batch, on disk and against
     ``taken`` (outputs other queued jobs will create).
+
+    Broken bags (see ``catalog.broken_reason``) are skipped when several bags
+    are given; a single bag is still tried, since part of it may be readable.
     """
     bags = [dict(b) for b in bags]
+    if skip_broken is None:
+        skip_broken = len(bags) > 1
     if output is not None and len(bags) != 1:
         raise ValueError("an exact output path needs exactly one bag; use an output directory")
     include, exclude = list(include), list(exclude)
@@ -420,16 +426,18 @@ def plan_batch(
             out = _unique(default_output_path(Path(bag["path"]), output_dir, suffix).expanduser().resolve(), taken)
         item = BatchItem(bag, out)
         items.append(item)
-        item.message = _skip_reason(conn, item, start, end, duration, include, exclude) or ""
+        item.message = _skip_reason(conn, item, start, end, duration, include, exclude, skip_broken) or ""
         if item.message:
             item.status = "skipped"
     return items
 
 
-def _skip_reason(conn, item: BatchItem, start, end, duration, include, exclude) -> str | None:
+def _skip_reason(conn, item: BatchItem, start, end, duration, include, exclude, skip_broken) -> str | None:
     bag = item.bag
     if bag["missing"]:
         return "files not found"
+    if skip_broken and bag.get("problem"):
+        return f"broken: {bag['problem']}"
     if bag["error"]:
         return "unreadable bag"
     if item.output.exists():
