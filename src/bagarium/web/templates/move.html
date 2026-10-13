@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Move · bagarium{% endblock %}
+{% block content %}
+<p><a href="/">← all bags</a></p>
+<h1>Move {{ bags | length }} bag{{ "s" if bags | length != 1 }}</h1>
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+
+{% if not bags %}
+<p class="empty">No bags selected. Pick bags with the checkboxes on the <a href="/">list</a>.</p>
+{% else %}
+<form method="post" action="/move" id="move-form"></form>
+
+<section>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Name</th><th class="num">Size</th><th>Tags / note</th></tr></thead>
+    <tbody>
+    {% for b in bags %}
+      <tr class="{% if b.missing %}missing{% endif %}">
+        <td>
+          <input type="hidden" name="bag" value="{{ b.id }}" form="move-form">
+          <a href="/bags/{{ b.id }}">{{ b.name }}</a>
+          {% if b.missing %}<span class="badge warn">missing</span>{% endif %}
+          <div class="note-preview">{{ b.path }}</div>
+        </td>
+        <td class="num">{{ b.size_bytes | size }}</td>
+        <td class="muted">{{ b.note | truncate(60) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="summary">{{ total_size | size }} in total</p>
+</section>
+
+<section>
+  <h2>Destination</h2>
+  <div class="extract">
+    <label class="wide">Folder
+      <input type="text" name="dest" list="root-dirs" placeholder="/path/to/folder" form="move-form" required>
+    </label>
+    <datalist id="root-dirs">{% for r in roots %}<option value="{{ r.path }}">{% endfor %}</datalist>
+    <div class="status-line">
+      <span class="muted">Bags move into this folder (created if needed) and keep their names, ids, tags and notes.
+        {% if bags | length == 1 %}With one bag, a path that does not exist yet renames it.{% endif %}
+        Moves across disks copy, verify, then delete the source.</span>
+      <button type="submit" form="move-form">Queue move</button>
+    </div>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

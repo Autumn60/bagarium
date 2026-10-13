@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .. import __version__, catalog, db, extract, fmt
+from .. import __version__, catalog, db, extract, fileops, fmt, importer, move
 from .jobs import MAX_ERRORS, Job, JobQueue
 
 HERE = Path(__file__).parent
@@ -51,7 +51,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             raise HTTPException(404, "bag not found")
         return row
 
-    def run_search(conn, q, tag, topic, type_, since, until, missing):
+    def run_search(conn, q, tag, topic, type_, since, until, missing, root=""):
         errors = []
 
         def parse(value: str, end: bool):
@@ -65,7 +65,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
 
         rows = catalog.search(
             conn, q, tag, [t for t in [topic] if t], [t for t in [type_] if t],
-            parse(since, False), parse(until, True), missing,
+            parse(since, False), parse(until, True), missing, root=root or None,
         )
         return rows, errors
 
@@ -81,11 +81,13 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         since: str = "",
         until: str = "",
         missing: bool = False,
+        root: str = "",
         conn: sqlite3.Connection = Depends(get_conn),
     ):
         tag = [t for t in tag if t]
-        rows, errors = run_search(conn, q, tag, topic, type, since, until, missing)
-        params = {"q": q, "tag": tag, "topic": topic, "type": type, "since": since, "until": until, "missing": missing}
+        rows, errors = run_search(conn, q, tag, topic, type, since, until, missing, root)
+        params = {"q": q, "tag": tag, "topic": topic, "type": type, "since": since, "until": until,
+                  "missing": missing, "root": root}
 
         def with_tags(new_tags: list[str]) -> str:
             p = {k: v for k, v in params.items() if v and k != "tag"}
@@ -96,6 +98,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             "tag_map": catalog.tags_of(conn, (r["id"] for r in rows)),
             "all_tags": catalog.all_tags(conn),
             "params": params,
+            "roots": catalog.list_roots(conn),
             "errors": errors,
             "with_tags": with_tags,
             "total_size": sum(r["size_bytes"] for r in rows),
@@ -110,6 +113,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             "topics": catalog.topics_of(conn, bag_id),
             "all_tags": catalog.all_tags(conn),
             "bag_jobs": [j for j in jobs.list() if j.get("bag_id") == bag_id][:1],
+            "roots": catalog.list_roots(conn),
             "error": error,
             "default_output": extract.default_output_path(Path(bag["path"])),
         })
@@ -332,6 +336,155 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         submit_extract(f"Extract from {pending} bag(s)", items, include)
         return redirect("/jobs")
 
+    # ------------------------------------------------------------ moving
+
+    def submit_move(label: str, items: list[move.MoveItem], **info) -> int:
+        pending = [i for i in items if i.status == "pending"]
+
+        def rows() -> list[dict]:
+            return [{
+                "source": i.bag["path"], "source_id": i.bag["id"], "status": i.status, "message": i.message,
+                "output": str(i.target), "result_bag_id": i.bag["id"] if i.status == "done" else None,
+            } for i in items]
+
+        def run(j: Job) -> dict:
+            j.update(total=1000 * len(pending))
+            j.set_stats(moved=0, skipped=len(items) - len(pending), failed=0)
+
+            def on_progress(k, n, item, frac):
+                j.update(done=round((k + frac) * 1000), current=f"[{k + 1}/{n}] {item.bag['path']}")
+                j.check_cancelled()
+
+            def on_item(item):
+                j.bump("moved" if item.status == "done" else item.status)
+                j.update(results=rows())
+
+            c = db.connect(db_path)
+            try:
+                move.run_moves(c, items, on_progress, on_item)
+            finally:
+                c.close()
+            return {"results": rows()}
+
+        return jobs.submit("move", label, run, reserved=[i.target for i in pending], results=rows(), **info)
+
+    @app.post("/bags/{bag_id}/move", dependencies=[Depends(same_origin)])
+    def move_one(bag_id: int, dest: str = Form(""), conn: sqlite3.Connection = Depends(get_conn)):
+        bag = load_bag(conn, bag_id)
+        here = f"/bags/{bag_id}"
+        if not dest.strip() or not Path(dest.strip()).expanduser().is_absolute():
+            return redirect(here, "destination must be an absolute path")
+        items = move.plan_moves(conn, [bag], dest.strip(), taken=jobs.reserved_outputs())
+        if items[0].status == "skipped":
+            return redirect(here, items[0].message)
+        submit_move(f"Move {bag['name']}", items, bag_id=bag_id)
+        return redirect("/jobs")
+
+    @app.get("/move", response_class=HTMLResponse)
+    def move_page(
+        request: Request,
+        bag: list[int] = Query(default=[]),
+        error: str = "",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        bags = load_bags(conn, bag)
+        return templates.TemplateResponse(request, "move.html", {
+            "bags": bags, "error": error, "roots": catalog.list_roots(conn),
+            "total_size": sum(b["size_bytes"] for b in bags),
+        })
+
+    @app.post("/move", dependencies=[Depends(same_origin)])
+    def move_many(bag: list[int] = Form(default=[]), dest: str = Form(""),
+                  conn: sqlite3.Connection = Depends(get_conn)):
+        back = "/move?" + urlencode({"bag": bag}, doseq=True)
+        bags = load_bags(conn, bag)
+        if not bags:
+            return redirect("/", "no bags selected")
+        if not dest.strip() or not Path(dest.strip()).expanduser().is_absolute():
+            return redirect(back, "destination must be an absolute path")
+        dest_path = Path(dest.strip()).expanduser()
+        if len(bags) > 1 and dest_path.exists() and not dest_path.is_dir():
+            return redirect(back, f"not a directory: {dest_path}")
+        # Several bags always go *into* the folder (created if needed); one bag may be renamed.
+        items = move.plan_moves(conn, bags, dest_path, taken=jobs.reserved_outputs())
+        pending = sum(i.status == "pending" for i in items)
+        if not pending:
+            return redirect(back, "nothing to move: " + "; ".join(sorted({i.message for i in items})))
+        submit_move(f"Move {pending} bag(s) to {dest_path}", items)
+        return redirect("/jobs")
+
+    # ------------------------------------------------------------ importing
+
+    @app.get("/import", response_class=HTMLResponse)
+    def import_page(request: Request, src: str = "", dest: str = "", error: str = "",
+                    conn: sqlite3.Connection = Depends(get_conn)):
+        items, plan_error = [], ""
+        if src.strip() and dest.strip() and not error:
+            try:
+                items = importer.plan_import(conn, src.strip(), dest.strip(), taken=jobs.reserved_outputs())
+                if not items:
+                    plan_error = f"no bags found under {src.strip()}"
+            except ValueError as e:
+                plan_error = str(e)
+        return templates.TemplateResponse(request, "import.html", {
+            "src": src, "dest": dest, "error": error or plan_error, "items": items,
+            "roots": catalog.list_roots(conn),
+            "need": importer.pending_bytes(items),
+            "free": fileops.free_bytes(Path(dest.strip()).expanduser()) if dest.strip().startswith("/") else None,
+            "pending": sum(i.status == "pending" for i in items),
+        })
+
+    @app.post("/import", dependencies=[Depends(same_origin)])
+    def run_import(src: str = Form(""), dest: str = Form(""), select: list[str] = Form(default=[]),
+                   conn: sqlite3.Connection = Depends(get_conn)):
+        src, dest = src.strip(), dest.strip()
+        back = "/import?" + urlencode({"src": src, "dest": dest})
+        if not src.startswith("/") or not dest.startswith("/"):
+            return redirect(back, "source and destination must be absolute paths")
+        if not select:
+            return redirect(back, "select at least one bag")
+        try:
+            items = importer.select(importer.plan_import(conn, src, dest, taken=jobs.reserved_outputs()), select)
+        except ValueError as e:
+            return redirect(back, str(e))
+        pending = [i for i in items if i.status == "pending"]
+        if not pending:
+            return redirect(back, "nothing to import: the selected bags are already imported or in the way")
+        need = importer.pending_bytes(items)
+        if need > fileops.free_bytes(Path(dest)):
+            return redirect(back, "not enough free space at the destination")
+        Path(dest).mkdir(parents=True, exist_ok=True)
+        catalog.add_roots(conn, [dest])
+
+        def rows() -> list[dict]:
+            return [{
+                "source": str(i.source), "source_id": None, "status": i.status, "message": i.message,
+                "output": str(i.target), "result_bag_id": i.result_id,
+            } for i in items]
+
+        def run(j: Job) -> dict:
+            j.update(total=max(need, 1))
+            j.set_stats(imported=0, skipped=len(items) - len(pending), failed=0)
+
+            def on_progress(k, n, copied, item):
+                j.update(done=copied, current=f"[{k + 1}/{n}] {item.source}")
+                j.check_cancelled()
+
+            def on_item(item):
+                j.bump({"done": "imported"}.get(item.status, item.status))
+                j.update(results=rows())
+
+            c = db.connect(db_path)
+            try:
+                importer.run_import(c, items, on_progress, on_item)
+            finally:
+                c.close()
+            return {"results": rows()}
+
+        jobs.submit("import", f"Import {len(pending)} bag(s) from {src}", run,
+                    reserved=[i.target for i in pending], results=rows())
+        return redirect("/jobs")
+
     # ------------------------------------------------------------ JSON
 
     @app.get("/api/jobs")
@@ -354,9 +507,10 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         since: str = "",
         until: str = "",
         missing: bool = False,
+        root: str = "",
         conn: sqlite3.Connection = Depends(get_conn),
     ):
-        rows, errors = run_search(conn, q, tag, topic, type, since, until, missing)
+        rows, errors = run_search(conn, q, tag, topic, type, since, until, missing, root)
         if errors:
             raise HTTPException(400, "; ".join(errors))
         tag_map = catalog.tags_of(conn, (r["id"] for r in rows))

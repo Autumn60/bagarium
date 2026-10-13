@@ -47,7 +47,7 @@
           <tbody>
           {% for r in job.results %}
             <tr>
-              <td><a href="/bags/{{ r.source_id }}"><code class="path">{{ r.source }}</code></a></td>
+              <td>{% if r.source_id %}<a href="/bags/{{ r.source_id }}"><code class="path">{{ r.source }}</code></a>{% else %}<code class="path">{{ r.source }}</code>{% endif %}</td>
               <td class="nowrap"><span class="status-{{ r.status }}">{{ "not run" if r.status == "pending" else r.status }}</span></td>
               <td>
                 {% if r.result_bag_id %}<a href="/bags/{{ r.result_bag_id }}"><code class="path">{{ r.output }}</code></a>

@@ -159,6 +159,36 @@ def _mark_missing(conn: sqlite3.Connection, root: Path, found: set[str]) -> int:
     return len(gone)
 
 
+def relocate(conn: sqlite3.Connection, old: Path, new: Path) -> list[int]:
+    """Point catalog entries at ``old`` (and bags nested inside it) to ``new``.
+
+    Call after moving the files. Ids, tags and notes are kept; size and mtime
+    are refreshed so the next scan sees the bags as unchanged.
+    """
+    old_s, new_s = str(old), str(new)
+    prefix = old_s.rstrip("/") + "/"
+    rows = conn.execute(
+        "SELECT id, path FROM bags WHERE path = ? OR substr(path, 1, ?) = ?", (old_s, len(prefix), prefix)
+    ).fetchall()
+    for row in rows:
+        path = Path(new_s + row["path"][len(old_s):])
+        size, mtime = scanner.stat_bag(path) if path.exists() else (None, None)
+        conn.execute(
+            "UPDATE bags SET path = ?, name = ?, missing = ?, size_bytes = COALESCE(?, size_bytes),"
+            " mtime = COALESCE(?, mtime) WHERE id = ?",
+            (str(path), path.name, 0 if path.exists() else 1, size, mtime, row["id"]),
+        )
+    conn.commit()
+    return [r["id"] for r in rows]
+
+
+def under_root(conn: sqlite3.Connection, path: str | Path) -> bool:
+    """Whether ``path`` is inside a registered root (and so will be rescanned)."""
+    path = Path(path)
+    return any(path == Path(r["path"]) or Path(r["path"]) in path.parents
+               for r in conn.execute("SELECT path FROM roots"))
+
+
 # ---------------------------------------------------------------- roots
 
 
@@ -236,6 +266,7 @@ def search(
     until: int | None = None,
     include_missing: bool = False,
     limit: int | None = None,
+    root: str | Path | None = None,
 ) -> list[sqlite3.Row]:
     """Search bags. All given conditions must hold (AND).
 
@@ -244,6 +275,7 @@ def search(
     - ``topics`` / ``types``: bag must contain a matching topic name / message type
       (substring, or glob if the pattern contains ``*?[``)
     - ``since`` / ``until``: epoch ns; bag's time range must overlap [since, until)
+    - ``root``: bag must be at or under this directory
     """
     where: list[str] = []
     params: list[object] = []
@@ -262,6 +294,11 @@ def search(
             clause, value = _pattern_clause(column, pattern)
             where.append(f"EXISTS (SELECT 1 FROM topics tp WHERE tp.bag_id = b.id AND {clause})")
             params.append(value)
+    if root:
+        root_s = str(Path(root).expanduser().resolve())
+        prefix = root_s.rstrip("/") + "/"
+        where.append("(b.path = ? OR substr(b.path, 1, ?) = ?)")
+        params += [root_s, len(prefix), prefix]
     if since is not None:
         where.append("b.end_ns >= ?")
         params.append(since)

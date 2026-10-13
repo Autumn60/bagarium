@@ -66,12 +66,13 @@ def stat_bag(path: Path) -> tuple[int, float]:
     """Return (total size in bytes, latest mtime) of a bag file or directory.
 
     For a bag directory only the files directly inside it count, so nested
-    bags (e.g. ``derivatives/``) are not included.
+    bags (e.g. ``derivatives/``) are not included. The directory's own mtime is
+    ignored too: it changes when something is added next to the bag's files.
     """
     if path.is_file():
         st = path.stat()
         return st.st_size, st.st_mtime
-    size, mtime = 0, path.stat().st_mtime
+    size, mtime = 0, 0.0
     for entry in os.scandir(path):
         if entry.is_file():
             st = entry.stat()

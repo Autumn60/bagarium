@@ -552,6 +552,10 @@ def run_batch(
                 raise
 
         progress(0.0, 0)
+        # The bag may have been moved since the batch was planned (queued jobs).
+        fresh = catalog.get_bag(conn, item.bag["id"])
+        if fresh is not None:
+            item.bag = dict(fresh)
         try:
             result, item.result_id = extract_bag(conn, item.bag, item.output, item.start_ns, item.end_ns,
                                                  include, exclude, progress, index=index)

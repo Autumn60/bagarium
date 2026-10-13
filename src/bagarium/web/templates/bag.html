@@ -42,6 +42,18 @@
   </form>
 </section>
 
+{% if not bag.missing %}
+<section>
+  <h2>Move</h2>
+  <form method="post" action="/bags/{{ bag.id }}/move" class="row">
+    <input type="text" name="dest" list="root-dirs" placeholder="folder to move into, or a new path to rename" required>
+    <datalist id="root-dirs">{% for r in roots %}<option value="{{ r.path }}">{% endfor %}</datalist>
+    <button type="submit">Queue move</button>
+  </form>
+  <p class="muted hint">Keeps id, tags and notes. An existing folder moves the bag into it; a new path renames it.</p>
+</section>
+{% endif %}
+
 <section>
   <h2>Note</h2>
   <form method="post" action="/bags/{{ bag.id }}/note">

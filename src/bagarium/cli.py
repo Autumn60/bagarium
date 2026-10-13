@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from . import __version__, catalog, db, extract, fmt
+from . import __version__, catalog, db, extract, fileops, fmt, importer, move
 
 
 class Ctx:
@@ -131,14 +131,16 @@ def _time_option(name: str, end: bool):
 @click.option("--type", "types", multiple=True, help="Require a message type (substring or glob, repeatable).")
 @_time_option("--since", end=False)
 @_time_option("--until", end=True)
+@click.option("-r", "--root", type=click.Path(file_okay=False, path_type=Path),
+              help="Only bags at or under this directory (e.g. a registered root).")
 @click.option("--missing", is_flag=True, help="Include bags whose files are gone.")
 @click.option("-n", "--limit", type=int, help="Show at most N bags.")
 @click.option("--paths", "paths_only", is_flag=True, help="Print only paths (for piping).")
 @click.option("--json", "as_json", is_flag=True, help="Print JSON.")
 @pass_ctx
-def ls(c: Ctx, query, tags, topics, types, since, until, missing, limit, paths_only, as_json) -> None:
+def ls(c: Ctx, query, tags, topics, types, since, until, root, missing, limit, paths_only, as_json) -> None:
     """List / search bags. QUERY words match name, path and note."""
-    rows = catalog.search(c.conn, " ".join(query), tags, topics, types, since, until, missing, limit)
+    rows = catalog.search(c.conn, " ".join(query), tags, topics, types, since, until, missing, limit, root=root)
     tag_map = catalog.tags_of(c.conn, (r["id"] for r in rows))
 
     if paths_only:
@@ -321,6 +323,117 @@ def extract_cmd(c: Ctx, bags, output, output_dir, suffix, start, end, duration, 
             click.secho(f"    failed  {item.bag['path']}: {item.message}", fg="red")
     counts = {s: sum(i.status == s for i in items) for s in ("done", "skipped", "failed")}
     click.echo(f"done {counts['done']}, skipped {counts['skipped']}, failed {counts['failed']}")
+    if counts["failed"]:
+        raise SystemExit(1)
+
+
+@main.command(name="mv")
+@click.argument("bags", nargs=-1, required=True)
+@click.argument("dest", type=click.Path(path_type=Path))
+@click.option("-n", "--dry-run", is_flag=True, help="Show what would be moved without moving anything.")
+@pass_ctx
+def mv_cmd(c: Ctx, bags: tuple[str, ...], dest: Path, dry_run: bool) -> None:
+    """Move BAGS into the directory DEST (or rename a single BAG to DEST).
+
+    Tags, notes and ids are kept. Bags nested inside a moved bag directory
+    move with it. Across filesystems the bag is copied and checked before the
+    source is removed.
+    """
+    rows = list({r["id"]: r for r in (c.bag(b) for b in bags)}.values())
+    if len(rows) > 1 and dest.exists() and not dest.is_dir():
+        raise click.UsageError(f"not a directory: {dest}")
+    items = move.plan_moves(c.conn, rows, dest)
+    if len(items) == 1 and items[0].status == "skipped":
+        raise click.ClickException(items[0].message)
+    for item in items:
+        if item.status == "skipped":
+            click.secho(f"   skipped  {item.bag['path']}: {item.message}", fg="yellow")
+        elif dry_run:
+            click.echo(f"     would  {item.bag['path']} -> {item.target}")
+    todo = [i for i in items if i.status == "pending"]
+    if not todo:
+        raise click.ClickException("nothing to move")
+    if dry_run:
+        return
+
+    with click.progressbar(length=1000 * len(todo), label=f"moving {len(todo)} bag(s)", show_percent=True) as bar:
+        def on_progress(k: int, n: int, item, frac: float) -> None:
+            bar.update(round((k + frac) * 1000) - bar.pos)
+
+        move.run_moves(c.conn, items, on_progress)
+
+    for item in todo:
+        if item.status == "done":
+            click.echo(f"{click.style('     moved', fg='green')}  {item.bag['path']} -> {item.target}")
+            if item.message:
+                click.secho(f"   warning  {item.message}", fg="yellow")
+        else:
+            click.secho(f"    failed  {item.bag['path']}: {item.message}", fg="red")
+    counts = {s: sum(i.status == s for i in items) for s in ("done", "skipped", "failed")}
+    click.echo(f"moved {counts['done']}, skipped {counts['skipped']}, failed {counts['failed']}")
+    if counts["done"] and not all(catalog.under_root(c.conn, i.target) for i in todo if i.status == "done"):
+        click.secho("note: some destinations are outside the registered roots, so scans will not revisit them "
+                    "(see `bagarium roots add`)", fg="yellow")
+    if counts["failed"]:
+        raise SystemExit(1)
+
+
+@main.command(name="import")
+@click.argument("src", type=click.Path(exists=True, path_type=Path))
+@click.argument("dest", type=click.Path(file_okay=False, path_type=Path))
+@click.option("-n", "--dry-run", is_flag=True, help="Show what would be copied without copying.")
+@click.option("-i", "--include", multiple=True, metavar="PATTERN",
+              help="Only bags whose path relative to SRC matches this glob (repeatable).")
+@click.option("-x", "--exclude", multiple=True, metavar="PATTERN",
+              help="Skip bags whose path relative to SRC matches this glob (repeatable).")
+@click.option("--no-register", is_flag=True, help="Do not register DEST as a root.")
+@pass_ctx
+def import_cmd(c: Ctx, src: Path, dest: Path, dry_run: bool, include, exclude, no_register: bool) -> None:
+    """Copy the bags under SRC (e.g. an SSD) into DEST and add them to the catalog.
+
+    The folder layout below SRC is kept and SRC is never modified. Bags that
+    are already in the catalog (same time range, message count and size) are
+    skipped, so running the same import again only copies new bags.
+    Use --include / --exclude to pick bags, e.g. `-i '2026-09-*/*' -x '*/derivatives/*'`.
+    """
+    try:
+        items = importer.plan_import(c.conn, src, dest, include=include, exclude=exclude)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    if not items:
+        raise click.ClickException(f"no bags found under {src}" + (" matching the patterns" if include or exclude else ""))
+
+    for item in items:
+        if item.status == "skipped":
+            click.secho(f"   skipped  {item.source}: {item.message}", fg="yellow")
+        elif dry_run:
+            click.echo(f"      copy  {item.source} -> {item.target}  ({fmt.size(item.size)})")
+    todo = [i for i in items if i.status == "pending"]
+    need, free = importer.pending_bytes(items), fileops.free_bytes(Path(dest).expanduser())
+    click.echo(f"{len(todo)} bag(s) to copy, {fmt.size(need)}; {fmt.size(free)} free at destination")
+    if not todo:
+        return
+    if need > free:
+        raise click.ClickException("not enough free space at the destination")
+    if dry_run:
+        return
+    if not no_register:
+        Path(dest).expanduser().mkdir(parents=True, exist_ok=True)
+        catalog.add_roots(c.conn, [dest])
+
+    with click.progressbar(length=max(need, 1), label=f"copying {len(todo)} bag(s)", show_percent=True) as bar:
+        def on_progress(k: int, n: int, copied: int, item) -> None:
+            bar.update(copied - bar.pos)
+
+        importer.run_import(c.conn, items, on_progress)
+
+    for item in todo:
+        if item.status == "done":
+            click.echo(f"{click.style('  imported', fg='green')}  {item.target} (#{item.result_id})")
+        else:
+            click.secho(f"    {item.status:>6}  {item.source}: {item.message}", fg="red" if item.status == "failed" else "yellow")
+    counts = {s: sum(i.status == s for i in items) for s in ("done", "skipped", "failed")}
+    click.echo(f"imported {counts['done']}, skipped {counts['skipped']}, failed {counts['failed']}")
     if counts["failed"]:
         raise SystemExit(1)
 

@@ -32,7 +32,7 @@
     {% for r in roots %}
       <tr>
         <td><code class="path">{{ r.path }}</code>{% if not r.exists %} <span class="badge err">not found</span>{% endif %}</td>
-        <td class="num"><a href="/?q={{ r.path | urlencode }}">{{ r.bag_count }}</a></td>
+        <td class="num"><a href="/?root={{ r.path | urlencode }}">{{ r.bag_count }}</a></td>
         <td class="nowrap">{{ r.last_scanned_at or "never" }}</td>
         <td class="actions">
           <form method="post" action="/scan/run" class="inline">

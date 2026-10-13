@@ -128,3 +128,17 @@ def test_abort_keeps_partial_progress(conn, bag_root):
     with pytest.raises(KeyboardInterrupt):
         catalog.scan(conn, [bag_root], on_bag=stop_after_two)
     assert len(catalog.search(conn, include_missing=True)) == 2
+
+
+def test_search_by_root(conn, bag_root, tmp_path):
+    from conftest import make_mcap
+
+    sibling = tmp_path / "bags2"  # shares the "bags" prefix but is not under it
+    make_mcap(sibling / "other.mcap", {"/a": ("std_msgs/msg/String", 1)})
+    catalog.scan(conn, [bag_root, sibling])
+
+    assert len(catalog.search(conn, root=bag_root)) == 4
+    assert names(catalog.search(conn, root=bag_root / "loose")) == ["camera.mcap", "old.db3"]
+    assert names(catalog.search(conn, root=sibling)) == ["other.mcap"]
+    assert names(catalog.search(conn, root=bag_root / "loose" / "camera.mcap")) == ["camera.mcap"]
+    assert names(catalog.search(conn, "old", root=bag_root)) == ["old.db3"]

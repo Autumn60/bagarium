@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}Import · bagarium{% endblock %}
+{% block content %}
+<h1>Import</h1>
+<p class="muted">Copy bags from another disk (e.g. an SSD) into a local folder. The source is never modified,
+  the folder layout is kept, and bags already in the catalog are skipped, so you can import the same disk again
+  to pick up only new recordings.</p>
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+
+<form method="get" action="/import" class="extract">
+  <label class="wide">From <input type="text" name="src" value="{{ src }}" placeholder="/media/you/SSD/rosbags" required></label>
+  <label class="wide">To <input type="text" name="dest" value="{{ dest }}" list="root-dirs" placeholder="/home/you/rosbags" required></label>
+  <datalist id="root-dirs">{% for r in roots %}<option value="{{ r.path }}">{% endfor %}</datalist>
+  <div class="status-line">
+    <span class="muted">The destination is registered as a scan folder.</span>
+    <button type="submit" class="secondary">Preview</button>
+  </div>
+</form>
+
+{% if items %}
+<form method="post" action="/import" id="import-form">
+  <input type="hidden" name="src" value="{{ src }}">
+  <input type="hidden" name="dest" value="{{ dest }}">
+</form>
+<section>
+  <div class="section-head">
+    <h2>{{ items | length }} bags found · {{ pending }} can be copied</h2>
+    <div class="actions">
+      <input type="search" id="bag-filter" placeholder="filter by path">
+      {% if pending %}
+      <button type="button" class="secondary" id="check-visible">Select shown</button>
+      <button type="button" class="secondary" id="uncheck-visible">Deselect shown</button>
+      {% endif %}
+    </div>
+  </div>
+  <div class="table-wrap">
+  <table class="import">
+    <thead><tr>
+      <th class="check">{% if pending %}<input type="checkbox" id="check-all" checked title="all bags that can be copied">{% endif %}</th>
+      <th>Source</th><th class="num">Size</th><th>Status</th><th>Destination</th>
+    </tr></thead>
+    <tbody>
+    {% for i in items %}
+      <tr class="{% if i.status == 'skipped' %}missing{% endif %}" data-search="{{ i.source | string | lower }}">
+        <td class="check">{% if i.status == "pending" %}<input type="checkbox" name="select" value="{{ i.source }}" data-size="{{ i.size }}" form="import-form" checked>{% endif %}</td>
+        <td><code class="path">{{ i.source }}</code></td>
+        <td class="num">{{ i.size | size }}</td>
+        <td class="nowrap"><span class="status-{{ 'done' if i.status == 'pending' else i.status }}">{{ "copy" if i.status == "pending" else i.status }}</span></td>
+        <td><code class="path">{{ i.target }}</code>{% if i.message %}<div class="muted">{{ i.message }}</div>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if pending %}
+  <div class="row">
+    <span class="muted" style="flex:1"><span id="selected-count">{{ pending }}</span> selected ·
+      <span id="selected-size">{{ need | size }}</span>{% if free is not none %} of {{ free | size }} free{% endif %} ·
+      copies are checked before they are put in place; the source stays as it is.</span>
+    <button type="submit" form="import-form" id="import-submit">Queue import</button>
+  </div>
+  {% endif %}
+</section>
+
+<script>
+  (() => {
+    const free = {{ free if free is not none else "null" }};
+    const rows = [...document.querySelectorAll("table.import tbody tr")];
+    const boxes = rows.map(r => r.querySelector("input[name=select]")).filter(Boolean);
+    const all = document.getElementById("check-all");
+    const visible = () => rows.filter(r => !r.hidden).map(r => r.querySelector("input[name=select]")).filter(Boolean);
+    const fmt = n => { const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+      while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return i ? `${n.toFixed(1)}${u[i]}` : `${n}B`; };
+    const refresh = () => {
+      const chosen = boxes.filter(b => b.checked);
+      const size = chosen.reduce((s, b) => s + Number(b.dataset.size), 0);
+      document.getElementById("selected-count").textContent = chosen.length;
+      document.getElementById("selected-size").textContent = fmt(size);
+      const btn = document.getElementById("import-submit");
+      btn.disabled = !chosen.length || (free !== null && size > free);
+      btn.title = free !== null && size > free ? "not enough free space" : "";
+      if (all) { all.checked = chosen.length === boxes.length; all.indeterminate = chosen.length > 0 && chosen.length < boxes.length; }
+    };
+    document.getElementById("bag-filter").addEventListener("input", e => {
+      const q = e.target.value.trim().toLowerCase();
+      rows.forEach(r => r.hidden = q && !r.dataset.search.includes(q));
+    });
+    all?.addEventListener("change", () => { boxes.forEach(b => b.checked = all.checked); refresh(); });
+    document.getElementById("check-visible")?.addEventListener("click", () => { visible().forEach(b => b.checked = true); refresh(); });
+    document.getElementById("uncheck-visible")?.addEventListener("click", () => { visible().forEach(b => b.checked = false); refresh(); });
+    boxes.forEach(b => b.addEventListener("change", refresh));
+    if (boxes.length) refresh();
+  })();
+</script>
+{% endif %}
+{% endblock %}

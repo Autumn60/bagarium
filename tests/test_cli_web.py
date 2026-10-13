@@ -235,3 +235,26 @@ def test_queued_extractions_do_not_collide(tmp_path, bag_root, monkeypatch):
     gate.set()
     wait_for_job(client)
     assert sorted(p.name for p in out.iterdir()) == ["run_lidar_same", "run_lidar_same_2"]
+
+
+def test_root_filter(tmp_path, bag_root):
+    dbp = tmp_path / "c.db"
+    run(dbp, "scan", bag_root / "loose", bag_root / "2025-10-09")
+    assert sorted(run(dbp, "ls", "--root", bag_root / "loose", "--paths").split()) == [
+        str(bag_root / "loose" / "camera.mcap"), str(bag_root / "loose" / "old.db3")]
+
+    client = TestClient(create_app(dbp))
+    page = client.get("/").text
+    assert '<option value="">All folders</option>' in page
+    assert f'value="{bag_root / "loose"}"' in page and "(2)</option>" in page
+    page = client.get("/", params={"root": str(bag_root / "loose")}).text
+    assert "camera.mcap" in page and "run_lidar" not in page
+    assert f'value="{bag_root / "loose"}" selected' in page
+    # tag links keep the folder filter
+    bag_id = next(b["id"] for b in client.get("/api/bags").json() if b["name"] == "old.db3")
+    client.post(f"/bags/{bag_id}/tags", data={"tags": "t"})
+    page = client.get("/", params={"root": str(bag_root / "loose")}).text
+    assert "root=" in page.split('class="tagbar"')[1].split("</div>")[0]
+    assert [b["name"] for b in client.get("/api/bags", params={"root": str(bag_root / "2025-10-09")}).json()] \
+        == ["run_db3", "run_lidar"]
+    assert 'href="/?root=' in client.get("/scan").text
