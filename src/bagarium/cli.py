@@ -268,55 +268,61 @@ def prune(c: Ctx, yes: bool) -> None:
 
 
 @main.command(name="extract")
-@click.argument("bag")
+@click.argument("bags", nargs=-1, required=True)
 @click.option("-o", "--output", type=click.Path(path_type=Path),
-              help="Output bag directory (default: <bag>_extract_<timestamp> next to the source).")
-@click.option("-s", "--start", metavar="TIME", help="Start: seconds from bag start (90, 1:30) or a time (2026-09-02T09:30:00).")
+              help="Output bag directory (single BAG only).")
+@click.option("-O", "--output-dir", type=click.Path(file_okay=False, path_type=Path),
+              help="Put outputs in this directory (default: next to each source bag).")
+@click.option("--suffix", help="Output name suffix: <bag>_<suffix> (default: extract_<timestamp>).")
+@click.option("-s", "--start", metavar="TIME",
+              help="Start: seconds from each bag's start (90, 1:30) or a time (2026-09-02T09:30:00).")
 @click.option("-e", "--end", metavar="TIME", help="End, same format as --start.")
 @click.option("-d", "--duration", type=float, metavar="SECONDS", help="Length from --start (instead of --end).")
 @click.option("-t", "--topic", "topics", multiple=True, metavar="PATTERN",
               help="Keep topics matching this name or glob (repeatable; default: all).")
 @click.option("-x", "--exclude", multiple=True, metavar="PATTERN", help="Drop topics matching this name or glob (repeatable).")
-@click.option("--no-index", is_flag=True, help="Do not add the result to the catalog.")
+@click.option("--no-index", is_flag=True, help="Do not add the results to the catalog.")
 @pass_ctx
-def extract_cmd(c: Ctx, bag: str, output, start, end, duration, topics, exclude, no_index) -> None:
-    """Write a time range and/or a subset of topics of BAG to a new bag.
+def extract_cmd(c: Ctx, bags, output, output_dir, suffix, start, end, duration, topics, exclude, no_index) -> None:
+    """Write a time range and/or a subset of topics of each BAG to a new bag.
 
-    The new bag has the same storage format (sqlite3 / mcap) and can be played
-    with `ros2 bag play`. Split and compressed bags are supported.
+    BAGS are ids or paths; select them with a search, e.g.
+    `bagarium extract -t '/sensing/*' $(bagarium ls -t outdoor --paths)`.
+    Each new bag has the source's storage format (sqlite3 / mcap) and can be
+    played with `ros2 bag play`. Split and compressed bags are supported.
     """
-    r = c.bag(bag)
     if end and duration is not None:
         raise click.UsageError("use either --end or --duration")
-    try:
-        start_ns = extract.parse_bag_time(start, r["start_ns"]) if start else None
-        end_ns = extract.parse_bag_time(end, r["start_ns"]) if end else None
-    except ValueError as e:
-        raise click.BadParameter(str(e))
-    if duration is not None:
-        base = start_ns if start_ns is not None else r["start_ns"]
-        if base is None:
-            raise click.UsageError("bag has no start time")
-        end_ns = base + round(duration * 1e9)
+    if output and (len(bags) > 1 or output_dir):
+        raise click.UsageError("--output takes a single BAG; use --output-dir for several")
+    rows = list({r["id"]: r for r in (c.bag(b) for b in bags)}.values())
+    items = extract.plan_batch(c.conn, rows, start, end, duration, topics, exclude, output_dir, suffix, output)
 
-    names = [t["name"] for t in catalog.topics_of(c.conn, r["id"])]
-    if names and not extract.select_topics(names, topics, exclude):
-        raise click.ClickException("no topics match the given patterns")
-    out = output or extract.default_output_path(Path(r["path"]))
+    if len(items) == 1 and items[0].status == "skipped":
+        raise click.ClickException(items[0].message)
+    for item in items:
+        if item.status == "skipped":
+            click.secho(f"   skipped  {item.bag['path']}: {item.message}", fg="yellow")
+    todo = [i for i in items if i.status == "pending"]
+    if not todo:
+        raise click.ClickException("nothing to extract")
 
-    with click.progressbar(length=1000, label="extracting", show_percent=True) as bar:
-        def on_progress(frac: float, written: int) -> None:
-            bar.update(round(frac * 1000) - bar.pos)
+    with click.progressbar(length=1000 * len(todo), label=f"extracting {len(todo)} bag(s)", show_percent=True) as bar:
+        def on_progress(k: int, n: int, item, frac: float, written: int) -> None:
+            bar.update(round((k + frac) * 1000) - bar.pos)
 
-        try:
-            result, new_id = extract.extract_bag(c.conn, r, out, start_ns, end_ns, topics, exclude,
-                                                 on_progress, index=not no_index)
-        except (FileExistsError, ValueError) as e:
-            raise click.ClickException(str(e))
+        extract.run_batch(c.conn, items, topics, exclude, on_progress, index=not no_index)
 
-    click.echo(f"wrote {fmt.count(result.message_count)} messages on {len(result.topics)} topics to {result.path}")
-    if new_id is not None:
-        click.echo(f"added to catalog as #{new_id}")
+    for item in todo:
+        if item.status == "done":
+            ref = f" (#{item.result_id})" if item.result_id is not None else ""
+            click.echo(f"{click.style('     wrote', fg='green')}  {item.output}{ref}: {fmt.count(item.message_count)} messages")
+        else:
+            click.secho(f"    failed  {item.bag['path']}: {item.message}", fg="red")
+    counts = {s: sum(i.status == s for i in items) for s in ("done", "skipped", "failed")}
+    click.echo(f"done {counts['done']}, skipped {counts['skipped']}, failed {counts['failed']}")
+    if counts["failed"]:
+        raise SystemExit(1)
 
 
 @main.command()

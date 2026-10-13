@@ -136,7 +136,7 @@ def test_cli_extract(tmp_path, bag_root):
 
     r = runner.invoke(main, ["--db", str(dbp), "extract", bag, "-o", str(out), "-s", "1", "-d", "0.5", "-x", "/lidar/*"])
     assert r.exit_code == 0, r.output
-    assert "wrote 6 messages on 1 topics" in r.output and "added to catalog" in r.output
+    assert "6 messages" in r.output and "done 1, skipped 0, failed 0" in r.output
     assert read_messages(out) == [("/tf", T0 + S + i * 100_000_000) for i in range(6)]
 
     r = runner.invoke(main, ["--db", str(dbp), "extract", bag, "-o", str(out)])
@@ -149,3 +149,69 @@ def test_nested_bags_are_discovered(tmp_path):
     assert list(scanner.discover(tmp_path)) == [parent, child]
     size, _ = scanner.stat_bag(parent)
     assert size == sum(p.stat().st_size for p in parent.iterdir() if p.is_file())
+
+
+def test_batch_plan_and_run(conn, bag_root, tmp_path):
+    catalog.scan(conn, [bag_root])
+    rows = catalog.search(conn)
+    by_name = {r["name"]: r for r in rows}
+    # a second bag with the same name as run_lidar, to exercise output name collisions
+    twin = make_bag_dir(bag_root / "other" / "run_lidar", {"/tf": ("tf2_msgs/msg/TFMessage", 5)}, start=T0 + 7 * S)
+    catalog.scan(conn, [bag_root])
+    twin_row = catalog.get_bag(conn, twin)
+
+    out_dir = tmp_path / "outs"
+    bags = [by_name["run_lidar"], twin_row, by_name["run_db3"], by_name["camera.mcap"]]
+    items = extract.plan_batch(conn, bags, start="0.2", end="1", include=["/tf", "/chatter"],
+                               output_dir=out_dir, suffix="cut")
+    assert [i.status for i in items] == ["pending", "pending", "pending", "skipped"]
+    assert items[3].message == "no topics match the given patterns"
+    assert [i.output.name for i in items[:3]] == ["run_lidar_cut", "run_lidar_cut_2", "run_db3_cut"]
+    # offsets are per bag
+    assert items[0].start_ns == T0 + 200_000_000 and items[1].start_ns == T0 + 7 * S + 200_000_000
+
+    seen = []
+    extract.run_batch(conn, items, ["/tf", "/chatter"], on_item=lambda i: seen.append(i.status))
+    assert seen == ["done", "done", "done"]
+    assert [i.message_count for i in items[:3]] == [9, 3, 3]  # 0.2-1.0 s of /tf; others end at 0.4 s
+    assert read_messages(out_dir / "run_lidar_cut")[0] == ("/tf", T0 + 200_000_000)
+    assert all(catalog.get_bag(conn, i.result_id) for i in items[:3])
+
+
+def test_batch_skips_and_failures(conn, bag_root, tmp_path):
+    catalog.scan(conn, [bag_root])
+    rows = catalog.search(conn)
+    items = extract.plan_batch(conn, rows, start="2026-01-01T00:00:00", output_dir=tmp_path / "o")
+    assert {i.message for i in items} == {"time range is outside the bag"}
+    with pytest.raises(ValueError, match="exactly one bag"):
+        extract.plan_batch(conn, rows, output=tmp_path / "x")
+
+    items = extract.plan_batch(conn, rows, output_dir=tmp_path / "o")
+    victim = next(i for i in items if i.bag["name"] == "old.db3")
+    (bag_root / "loose" / "old.db3").write_bytes(b"corrupted")
+    extract.run_batch(conn, items)
+    assert victim.status == "failed" and victim.message
+    assert sum(i.status == "done" for i in items) == 3
+
+    def stop(*args):
+        raise KeyboardInterrupt
+
+    items = extract.plan_batch(conn, rows[:1], output_dir=tmp_path / "p")
+    with pytest.raises(KeyboardInterrupt):
+        extract.run_batch(conn, items, on_progress=stop)
+
+
+def test_cli_batch_extract(tmp_path, bag_root):
+    dbp = tmp_path / "c.db"
+    runner = CliRunner()
+    runner.invoke(main, ["--db", str(dbp), "scan", str(bag_root)])
+    paths = runner.invoke(main, ["--db", str(dbp), "ls", "--paths"]).output.split()
+    out_dir = tmp_path / "outs"
+
+    r = runner.invoke(main, ["--db", str(dbp), "extract", *paths, "-o", str(tmp_path / "x")])
+    assert r.exit_code != 0 and "--output-dir" in r.output
+
+    r = runner.invoke(main, ["--db", str(dbp), "extract", *paths, "-O", str(out_dir), "--suffix", "s", "-t", "/camera/*", "-t", "/odom"])
+    assert r.exit_code == 0, r.output
+    assert "done 2, skipped 2, failed 0" in r.output and "no topics match" in r.output
+    assert sorted(p.name for p in out_dir.iterdir()) == ["camera_s", "old_s"]

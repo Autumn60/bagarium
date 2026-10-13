@@ -55,6 +55,10 @@ bagarium extract 12 -s 60 -d 30                       # 30 s starting 60 s into 
 bagarium extract 12 -s 1:00 -e 1:30 -t '/sensing/*' -x '*/image_raw'
 bagarium extract 12 -s 2026-09-03T16:40:00 -e 2026-09-03T16:41:00 -o ~/rosbags/cut
 
+# Several bags at once: same topics / range applied to each, one output per bag
+bagarium extract 3 5 8 -s 0 -d 60 -t '/sensing/*' -O ~/rosbags/cuts
+bagarium extract $(bagarium ls -t outdoor --paths) -x '*/image_raw' --suffix no_images
+
 # Web UI (http://127.0.0.1:8000/)
 bagarium serve
 ```
@@ -78,6 +82,10 @@ bagarium serve
   and zstd-compressed bags (file or message mode) are written uncompressed.
 - The output defaults to `<bag>_extract_<timestamp>` next to the source, and is added to the catalog
   with a note describing where it came from (`--no-index` to skip).
+- With several bags, time offsets count from each bag's own start, outputs are named `<bag>_<suffix>`
+  (next to each source, or in `--output-dir`; clashing names get `_2`, `_3`, ...), bags that have no
+  matching topics, do not overlap the range, or are missing/unreadable are skipped, and a bag that fails
+  does not stop the rest.
 
 ### Catalog database location
 
@@ -85,9 +93,11 @@ Defaults to `~/.local/share/bagarium/bagarium.db`. Override with `--db PATH` or 
 
 ## Web UI
 
-- List: search by keyword, topic, message type and date; click tags to filter
+- List: search by keyword, topic, message type and date; click tags to filter; select bags to extract from
 - Detail: metadata, topic list (filterable, with message counts and average rates), tag and note editing,
   and extraction (pick topics and a time range; runs in the background)
+- Extract: batch extraction from the selected bags, with topics shown across all of them
+- Jobs: progress of the running scan / extraction and per-bag results
 - Scan: register / remove folders and scan them in the background with a progress bar (cancellable)
 - JSON API: `/api/bags`, `/api/bags/{id}`, `/api/job` (spec at `/api/docs`)
 

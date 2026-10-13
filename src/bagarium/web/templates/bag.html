@@ -99,33 +99,11 @@
 {% endif %}
 
 <script>
-  (() => {
-    const rows = [...document.querySelectorAll("table.topics tbody tr")];
-    const boxes = rows.map(r => r.querySelector("input[name=topic]")).filter(Boolean);
-    const all = document.getElementById("check-all");
-    const count = document.getElementById("selected-count");
-    const visible = () => rows.filter(r => !r.hidden).map(r => r.querySelector("input[name=topic]")).filter(Boolean);
-    const refresh = () => {
-      if (!count) return;
-      const n = boxes.filter(b => b.checked).length;
-      count.textContent = n;
-      all.checked = n === boxes.length;
-      all.indeterminate = n > 0 && n < boxes.length;
-    };
-    document.getElementById("topic-filter").addEventListener("input", e => {
-      const q = e.target.value.trim().toLowerCase();
-      rows.forEach(r => r.hidden = q && !r.dataset.search.includes(q));
-    });
-    all?.addEventListener("change", () => { boxes.forEach(b => b.checked = all.checked); refresh(); });
-    document.getElementById("check-visible")?.addEventListener("click", () => { visible().forEach(b => b.checked = true); refresh(); });
-    document.getElementById("uncheck-visible")?.addEventListener("click", () => { visible().forEach(b => b.checked = false); refresh(); });
-    boxes.forEach(b => b.addEventListener("change", refresh));
-  })();
-
   document.querySelectorAll("button.copy").forEach(btn => btn.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(btn.dataset.copy); btn.textContent = "copied"; }
     catch { btn.textContent = "copy failed"; }
     setTimeout(() => btn.textContent = "copy", 1500);
   }));
 </script>
+<script src="/static/topic-select.js"></script>
 {% endblock %}

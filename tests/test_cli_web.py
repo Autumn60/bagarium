@@ -160,3 +160,35 @@ def test_web_extract(tmp_path, bag_root):
     assert new["path"] == str(out) and [t["name"] for t in new["topics"]] == ["/tf"]
     assert "Extracted from" in new["note"]
     assert f'href="/bags/{new["id"]}"' in client.get(f"/bags/{bag_id}").text
+
+
+def test_web_batch_extract(tmp_path, bag_root):
+    client = TestClient(create_app(tmp_path / "c.db"))
+    client.post("/scan/roots", data={"path": str(bag_root)})
+    client.post("/scan/run", data={})
+    wait_for_job(client)
+    ids = {b["name"]: b["id"] for b in client.get("/api/bags").json()}
+    assert 'name="bag" value=' in client.get("/").text
+
+    chosen = [ids["run_lidar"], ids["camera.mcap"], ids["old.db3"]]
+    page = client.get("/extract", params={"bag": chosen}).text
+    assert "Extract from 3 bags" in page and 'value="/lidar/points"' in page and "1 / 3" in page
+
+    def post(**data):
+        return client.post("/extract", data={"bag": chosen, **data})
+
+    assert "select at least one topic" in post().text
+    assert "absolute path" in post(topic=["/tf"], output_mode="dir", output_dir="rel").text
+    assert "nothing to extract" in post(topic=["/nope"]).text
+
+    out_dir = tmp_path / "outs"
+    r = post(topic=["/tf", "/odom"], start="0", end="0.5", output_mode="dir", output_dir=str(out_dir), suffix="w")
+    assert r.url.path == "/jobs"
+    status = wait_for_job(client)
+    assert status["outcome"] == "completed", status
+    assert status["stats"] == {"done": 2, "skipped": 1, "failed": 0, "messages": 12}
+    assert sorted(p.name for p in out_dir.iterdir()) == ["old_w", "run_lidar_w"]
+    results = {r["source_id"]: r for r in status["results"]}
+    assert results[ids["camera.mcap"]]["status"] == "skipped"
+    jobs_page = client.get("/jobs").text
+    assert "run_lidar_w" in jobs_page and "no topics match" in jobs_page

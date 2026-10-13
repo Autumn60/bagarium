@@ -84,10 +84,15 @@ def select_topics(names: Iterable[str], include: Iterable[str] = (), exclude: It
     return [n for n in names if (not include or hit(n, include)) and not hit(n, exclude)]
 
 
-def default_output_path(src: Path) -> Path:
+def default_suffix() -> str:
+    return f"extract_{datetime.now():%Y%m%d-%H%M%S}"
+
+
+def default_output_path(src: Path, output_dir: Path | None = None, suffix: str | None = None) -> Path:
+    """``<output_dir or next to src>/<bag name without extension>_<suffix>``."""
     src = Path(src)
-    stem = src.name if src.is_dir() else src.stem
-    return src.parent / f"{stem}_extract_{datetime.now():%Y%m%d-%H%M%S}"
+    stem = src.stem if src.suffix in scanner.BAG_SUFFIXES else src.name
+    return (Path(output_dir) if output_dir else src.parent) / f"{stem}_{suffix or default_suffix()}"
 
 
 # ---------------------------------------------------------------- input layout
@@ -411,3 +416,140 @@ def extract_bag(
            f"{fmt.time(end_ns if end_ns is not None else bag['end_ns'])}"
     catalog.set_note(conn, new["id"], f"Extracted from {bag['path']} ({span}, {len(result.topics)} topics)")
     return result, new["id"]
+
+
+# ---------------------------------------------------------------- batches
+
+
+@dataclass
+class BatchItem:
+    bag: dict
+    output: Path
+    start_ns: int | None = None
+    end_ns: int | None = None
+    status: str = "pending"  # pending / skipped / done / failed
+    message: str = ""
+    result_id: int | None = None
+    message_count: int = 0
+
+
+def plan_batch(
+    conn: sqlite3.Connection,
+    bags: Iterable[sqlite3.Row | dict],
+    start: str | None = None,
+    end: str | None = None,
+    duration: float | None = None,
+    include: Iterable[str] = (),
+    exclude: Iterable[str] = (),
+    output_dir: str | Path | None = None,
+    suffix: str | None = None,
+    output: str | Path | None = None,
+) -> list[BatchItem]:
+    """Decide output paths and time ranges for each bag, and which bags to skip.
+
+    Times are resolved per bag, so offsets ("60", "1:30") count from each bag's
+    own start. ``output`` names the exact output and is only valid for one bag;
+    otherwise names are made unique within the batch and on disk.
+    """
+    bags = [dict(b) for b in bags]
+    if output is not None and len(bags) != 1:
+        raise ValueError("an exact output path needs exactly one bag; use an output directory")
+    include, exclude = list(include), list(exclude)
+    suffix = suffix or default_suffix()
+    taken: set[Path] = set()
+    items = []
+    for bag in bags:
+        if output is not None:
+            out = Path(output).expanduser().resolve()
+        else:
+            out = _unique(default_output_path(Path(bag["path"]), output_dir, suffix).expanduser().resolve(), taken)
+        item = BatchItem(bag, out)
+        items.append(item)
+        item.message = _skip_reason(conn, item, start, end, duration, include, exclude) or ""
+        if item.message:
+            item.status = "skipped"
+    return items
+
+
+def _skip_reason(conn, item: BatchItem, start, end, duration, include, exclude) -> str | None:
+    bag = item.bag
+    if bag["missing"]:
+        return "files not found"
+    if bag["error"]:
+        return "unreadable bag"
+    if item.output.exists():
+        return f"output already exists: {item.output}"
+    try:
+        item.start_ns = parse_bag_time(start, bag["start_ns"]) if start else None
+        item.end_ns = parse_bag_time(end, bag["start_ns"]) if end else None
+    except ValueError as e:
+        return str(e)
+    if duration is not None:
+        base = item.start_ns if item.start_ns is not None else bag["start_ns"]
+        if base is None:
+            return "bag has no start time"
+        item.end_ns = base + round(duration * 1e9)
+    if item.start_ns is not None and item.end_ns is not None and item.start_ns > item.end_ns:
+        return "start is after end"
+    if bag["start_ns"] is not None and (
+        (item.start_ns is not None and item.start_ns > bag["end_ns"])
+        or (item.end_ns is not None and item.end_ns < bag["start_ns"])
+    ):
+        return "time range is outside the bag"
+    names = [t["name"] for t in catalog.topics_of(conn, bag["id"])]
+    if not select_topics(names, include, exclude):
+        return "no topics match the given patterns"
+    return None
+
+
+def _unique(path: Path, taken: set[Path]) -> Path:
+    candidate, n = path, 2
+    while candidate in taken or candidate.exists():
+        candidate = path.with_name(f"{path.name}_{n}")
+        n += 1
+    taken.add(candidate)
+    return candidate
+
+
+BatchProgress = Callable[[int, int, BatchItem, float, int], None]
+
+
+def run_batch(
+    conn: sqlite3.Connection,
+    items: list[BatchItem],
+    include: Iterable[str] = (),
+    exclude: Iterable[str] = (),
+    on_progress: BatchProgress | None = None,
+    on_item: Callable[[BatchItem], None] | None = None,
+    index: bool = True,
+) -> None:
+    """Extract every pending item in turn. A failing bag is recorded and the batch goes on.
+
+    ``on_progress(k, n, item, fraction, written)`` reports progress within the
+    k-th of n pending items; an exception raised from it aborts the whole batch.
+    """
+    include, exclude = list(include), list(exclude)
+    todo = [i for i in items if i.status == "pending"]
+    for k, item in enumerate(todo):
+        raised: list[BaseException] = []
+
+        def progress(frac: float, written: int, k=k, item=item) -> None:
+            if on_progress is None:
+                return
+            try:
+                on_progress(k, len(todo), item, frac, written)
+            except BaseException as e:
+                raised.append(e)
+                raise
+
+        progress(0.0, 0)
+        try:
+            result, item.result_id = extract_bag(conn, item.bag, item.output, item.start_ns, item.end_ns,
+                                                 include, exclude, progress, index=index)
+            item.status, item.message_count = "done", result.message_count
+        except Exception as e:
+            if raised and e is raised[0]:
+                raise
+            item.status, item.message = "failed", f"{type(e).__name__}: {e}"
+        if on_item:
+            on_item(item)

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Jobs · bagarium{% endblock %}
+{% block content %}
+<h1>Jobs</h1>
+{% if job.kind %}
+  {% set next = "/jobs" %}{% include "_job.html" %}
+{% else %}
+  <p class="empty">No job has run since the server started.</p>
+{% endif %}
+{% endblock %}

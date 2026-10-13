@@ -26,17 +26,24 @@
 </div>
 {% endif %}
 
-<p class="summary">{{ bags | length }} bags · {{ total_size | size }}</p>
+<form method="get" action="/extract" id="bulk-form" class="bulk">
+  <p class="summary">{{ bags | length }} bags · {{ total_size | size }}</p>
+  {% if bags %}
+  <span class="muted"><span id="bulk-count">0</span> selected</span>
+  <button type="submit" id="bulk-extract" disabled>Extract selected…</button>
+  {% endif %}
+</form>
 
 {% if bags %}
 <div class="table-wrap">
 <table class="bags">
   <thead>
-    <tr><th>Start</th><th>Name</th><th class="num">Duration</th><th class="num">Size</th><th class="num">Msgs</th><th>Storage</th><th>Tags</th></tr>
+    <tr><th class="check"><input type="checkbox" id="select-all" title="select all shown"></th><th>Start</th><th>Name</th><th class="num">Duration</th><th class="num">Size</th><th class="num">Msgs</th><th>Storage</th><th>Tags</th></tr>
   </thead>
   <tbody>
   {% for b in bags %}
     <tr class="{% if b.missing %}missing{% endif %}">
+      <td class="check"><input type="checkbox" name="bag" value="{{ b.id }}" form="bulk-form"></td>
       <td class="nowrap">{{ b.start_ns | time }}</td>
       <td>
         <a href="/bags/{{ b.id }}">{{ b.name }}</a>
@@ -57,4 +64,21 @@
 {% else %}
 <p class="empty">No bags found. Add a folder on the <a href="/scan">Scan</a> page, or run <code>bagarium scan &lt;dir&gt;</code>.</p>
 {% endif %}
+<script>
+  (() => {
+    const boxes = [...document.querySelectorAll("input[name=bag]")];
+    const all = document.getElementById("select-all");
+    if (!all) return;
+    const refresh = () => {
+      const n = boxes.filter(b => b.checked).length;
+      document.getElementById("bulk-count").textContent = n;
+      document.getElementById("bulk-extract").disabled = n === 0;
+      all.checked = n === boxes.length;
+      all.indeterminate = n > 0 && n < boxes.length;
+    };
+    all.addEventListener("change", () => { boxes.forEach(b => b.checked = all.checked); refresh(); });
+    boxes.forEach(b => b.addEventListener("change", refresh));
+    refresh();
+  })();
+</script>
 {% endblock %}

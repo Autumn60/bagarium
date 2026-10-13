@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Extract · bagarium{% endblock %}
+{% block content %}
+<p><a href="/">← all bags</a></p>
+<h1>Extract from {{ bags | length }} bag{{ "s" if bags | length != 1 }}</h1>
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+
+{% if not bags %}
+<p class="empty">No bags selected. Pick bags with the checkboxes on the <a href="/">list</a>.</p>
+{% else %}
+<form method="post" action="/extract" id="extract-form"></form>
+
+<section>
+  <h2>Bags</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Start</th><th>Name</th><th class="num">Duration</th><th class="num">Size</th></tr></thead>
+    <tbody>
+    {% for b in bags %}
+      <tr class="{% if b.missing or b.error %}missing{% endif %}">
+        <td class="nowrap">{{ b.start_ns | time }}<input type="hidden" name="bag" value="{{ b.id }}" form="extract-form"></td>
+        <td>
+          <a href="/bags/{{ b.id }}">{{ b.name }}</a>
+          {% if b.missing %}<span class="badge warn">missing</span>{% endif %}
+          {% if b.error %}<span class="badge err">error</span>{% endif %}
+          <div class="note-preview">{{ b.path }}</div>
+        </td>
+        <td class="num">{{ duration(b.start_ns, b.end_ns) }}</td>
+        <td class="num">{{ b.size_bytes | size }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <h2>Topics <span class="muted">({{ topics | length }} across the selected bags)</span></h2>
+    <div class="actions">
+      <input type="search" id="topic-filter" placeholder="filter topics / types">
+      <button type="button" class="secondary" id="check-visible">Select shown</button>
+      <button type="button" class="secondary" id="uncheck-visible">Deselect shown</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+  <table class="topics">
+    <thead><tr><th class="check"><input type="checkbox" id="check-all" checked title="all topics"></th><th>Topic</th><th>Type</th><th class="num">In bags</th><th class="num">Messages</th></tr></thead>
+    <tbody>
+    {% for t in topics %}
+      <tr data-search="{{ t.name | lower }} {{ t.types | lower }}">
+        <td class="check"><input type="checkbox" name="topic" value="{{ t.name }}" form="extract-form" checked></td>
+        <td>{{ t.name }}</td>
+        <td>{{ t.types }}</td>
+        <td class="num">{{ t.bag_count }} / {{ bags | length }}</td>
+        <td class="num">{{ t.message_count | count }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <h2>Extract</h2>
+  <div class="extract">
+    <div class="fields">
+      <label>Start <input type="text" name="start" placeholder="0" size="10" form="extract-form"></label>
+      <label>End <input type="text" name="end" placeholder="end" size="10" form="extract-form"></label>
+      <span class="muted">seconds from <em>each</em> bag's start (<code>90</code>, <code>1:30</code>) or a time; empty = whole bag</span>
+    </div>
+    <div class="fields">
+      <label><input type="radio" name="output_mode" value="source" form="extract-form" checked> next to each source bag</label>
+      <label class="wide"><input type="radio" name="output_mode" value="dir" form="extract-form"> into folder
+        <input type="text" name="output_dir" placeholder="/path/to/output" form="extract-form"
+               oninput="document.querySelector('input[name=output_mode][value=dir]').checked = true"></label>
+    </div>
+    <label class="wide">Name suffix <input type="text" name="suffix" value="{{ suffix }}" form="extract-form"></label>
+    <div class="status-line">
+      <span class="muted"><span id="selected-count">{{ topics | length }}</span> of {{ topics | length }} topics selected ·
+        each output is named <code>&lt;bag&gt;_&lt;suffix&gt;</code> · bags without selected topics are skipped</span>
+      <button type="submit" form="extract-form" {% if job.running %}disabled title="another job is running"{% endif %}>Extract</button>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<script src="/static/topic-select.js"></script>
+{% endblock %}

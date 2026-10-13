@@ -97,3 +97,16 @@ form.extract { display: flex; flex-direction: column; gap: 10px; background: var
 form.extract .fields { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 form.extract label { display: flex; gap: 6px; align-items: center; }
 form.extract label.wide input { flex: 1; }
+
+form.bulk { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 8px 0; }
+form.bulk .summary { margin: 0; margin-right: auto; }
+div.extract { display: flex; flex-direction: column; gap: 10px; background: var(--card);
+  border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
+div.extract .fields { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+div.extract label { display: flex; gap: 6px; align-items: center; }
+div.extract label.wide { flex: 1; }
+div.extract label.wide input[type=text] { flex: 1; }
+.status-done { color: var(--accent); }
+.status-skipped, .status-pending { color: var(--warn); }
+.status-failed { color: var(--err); }
+.card .table-wrap { margin-top: 8px; }

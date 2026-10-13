@@ -31,6 +31,7 @@ class JobRunner:
             s = dict(self._state)
             s["stats"] = dict(s.get("stats") or {})
             s["errors"] = list(s.get("errors") or [])
+            s["results"] = list(s.get("results") or [])
             return s
 
     @property

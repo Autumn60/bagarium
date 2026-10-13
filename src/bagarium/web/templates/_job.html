@@ -25,6 +25,26 @@
     {% if job.error %}<div class="error">{{ job.error }}</div>{% endif %}
     {% if job.stats %}<div>{{ stats_text(job.stats) }}</div>{% endif %}
     {% if job.result_bag_id %}<div>Created <a href="/bags/{{ job.result_bag_id }}"><code class="path">{{ job.result_path }}</code></a></div>{% endif %}
+    {% if job.results %}
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Source</th><th>Status</th><th>Output</th></tr></thead>
+        <tbody>
+        {% for r in job.results %}
+          <tr>
+            <td><a href="/bags/{{ r.source_id }}"><code class="path">{{ r.source }}</code></a></td>
+            <td class="nowrap"><span class="status-{{ r.status }}">{{ "not run" if r.status == "pending" else r.status }}</span></td>
+            <td>
+              {% if r.result_bag_id %}<a href="/bags/{{ r.result_bag_id }}"><code class="path">{{ r.output }}</code></a>
+              {% elif r.status == "done" %}<code class="path">{{ r.output }}</code>{% endif %}
+              {% if r.message %}<div class="muted">{{ r.message }}</div>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    {% endif %}
     {% if job.errors %}
       <details>
         <summary>Errors{% if job.stats.errors and job.stats.errors > job.errors|length %} (first {{ job.errors|length }}){% endif %}</summary>
