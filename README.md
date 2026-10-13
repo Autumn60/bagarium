@@ -19,8 +19,15 @@ pipx install .
 ## Usage
 
 ```bash
-# Index bags (re-running only updates what changed)
+# Index bags (re-running only updates what changed).
+# Directories given here are registered as roots.
 bagarium scan ~/rosbags /mnt/hdd/bags
+bagarium scan                    # rescan all registered roots
+
+# Registered roots
+bagarium roots                   # list
+bagarium roots add ~/rosbags     # register without scanning
+bagarium roots rm ~/rosbags      # unregister (indexed bags are kept)
 
 # List / search
 bagarium ls
@@ -64,7 +71,8 @@ Defaults to `~/.local/share/bagarium/bagarium.db`. Override with `--db PATH` or 
 
 - List: search by keyword, topic, message type and date; click tags to filter
 - Detail: metadata, topic list (message counts and average rates), tag and note editing
-- JSON API: `/api/bags`, `/api/bags/{id}` (spec at `/api/docs`)
+- Scan: register / remove folders and scan them in the background with a progress bar (cancellable)
+- JSON API: `/api/bags`, `/api/bags/{id}`, `/api/scan` (spec at `/api/docs`)
 
 The server listens on `127.0.0.1` only by default. There is no authentication, so be careful when exposing it with `--host 0.0.0.0`.
 

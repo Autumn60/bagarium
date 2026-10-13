@@ -38,6 +38,13 @@ CREATE TABLE IF NOT EXISTS tags (
     name TEXT NOT NULL UNIQUE
 );
 
+CREATE TABLE IF NOT EXISTS roots (
+    id              INTEGER PRIMARY KEY,
+    path            TEXT NOT NULL UNIQUE,
+    added_at        TEXT NOT NULL,
+    last_scanned_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS bag_tags (
     bag_id INTEGER NOT NULL REFERENCES bags(id) ON DELETE CASCADE,
     tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
@@ -59,7 +66,8 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Web requests may resolve the dependency and run the handler on different
     # worker threads; each request still gets its own connection.
-    conn = sqlite3.connect(path, check_same_thread=False)
+    # The timeout lets writers wait for a concurrent scan's short transactions.
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")

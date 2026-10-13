@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import __version__, catalog, db, fmt
+from .scanjob import ScanJob
 
 HERE = Path(__file__).parent
 
@@ -26,6 +27,8 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         time=fmt.time, size=fmt.size, count=fmt.count,
     )
     templates.env.globals.update(duration=fmt.duration, version=__version__)
+
+    job = app.state.scan_job = ScanJob(db_path)
 
     def get_conn() -> Iterator[sqlite3.Connection]:
         conn = db.connect(db_path)
@@ -126,7 +129,52 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
     def tags_page(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
         return templates.TemplateResponse(request, "tags.html", {"all_tags": catalog.all_tags(conn)})
 
+    # ------------------------------------------------------------ scanning
+
+    def back_to_scan(error: str = "") -> RedirectResponse:
+        return RedirectResponse("/scan" + ("?" + urlencode({"error": error}) if error else ""), status_code=303)
+
+    @app.get("/scan", response_class=HTMLResponse)
+    def scan_page(request: Request, error: str = "", conn: sqlite3.Connection = Depends(get_conn)):
+        return templates.TemplateResponse(request, "scan.html", {
+            "roots": catalog.list_roots(conn), "job": job.status(), "error": error,
+        })
+
+    @app.post("/scan/roots", dependencies=[Depends(same_origin)])
+    def add_root(path: str = Form(...), conn: sqlite3.Connection = Depends(get_conn)):
+        try:
+            catalog.add_roots(conn, [path.strip()])
+        except ValueError as e:
+            return back_to_scan(str(e))
+        return back_to_scan()
+
+    @app.post("/scan/roots/remove", dependencies=[Depends(same_origin)])
+    def remove_root(path: str = Form(...), conn: sqlite3.Connection = Depends(get_conn)):
+        catalog.remove_roots(conn, [path])
+        return back_to_scan()
+
+    @app.post("/scan/run", dependencies=[Depends(same_origin)])
+    def run_scan(root: str = Form(""), force: bool = Form(False), conn: sqlite3.Connection = Depends(get_conn)):
+        registered = [r["path"] for r in catalog.list_roots(conn)]
+        if root and root not in registered:
+            return back_to_scan(f"not a registered root: {root}")
+        roots = [root] if root else registered
+        if not roots:
+            return back_to_scan("no folders registered; add one first")
+        if not job.start(roots, force):
+            return back_to_scan("a scan is already running")
+        return back_to_scan()
+
+    @app.post("/scan/cancel", dependencies=[Depends(same_origin)])
+    def cancel_scan():
+        job.cancel()
+        return back_to_scan()
+
     # ------------------------------------------------------------ JSON
+
+    @app.get("/api/scan")
+    def api_scan_status():
+        return job.status()
 
     @app.get("/api/bags")
     def api_bags(

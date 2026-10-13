@@ -43,17 +43,28 @@ def main(ctx: click.Context, db_path: str | None) -> None:
 
 
 @main.command()
-@click.argument("paths", nargs=-1, required=True, type=click.Path(path_type=Path))
+@click.argument("paths", nargs=-1, type=click.Path(path_type=Path))
 @click.option("--force", is_flag=True, help="Re-read bags even if they look unchanged.")
+@click.option("--no-register", is_flag=True, help="Do not add PATHS to the registered roots.")
 @click.option("-v", "--verbose", is_flag=True, help="Print every bag.")
 @pass_ctx
-def scan(c: Ctx, paths: tuple[Path, ...], force: bool, verbose: bool) -> None:
-    """Find bags under PATHS and add/update them in the catalog."""
+def scan(c: Ctx, paths: tuple[Path, ...], force: bool, no_register: bool, verbose: bool) -> None:
+    """Find bags under PATHS and add/update them in the catalog.
 
-    def on_bag(path: Path, status: str) -> None:
+    Directories given as PATHS are registered as roots (see `bagarium roots`).
+    Without PATHS, all registered roots are scanned.
+    """
+    if not paths:
+        paths = tuple(Path(r["path"]) for r in catalog.list_roots(c.conn))
+        if not paths:
+            raise click.UsageError("no PATHS given and no roots registered")
+    elif not no_register:
+        catalog.add_roots(c.conn, [p for p in paths if p.is_dir()])
+
+    def on_bag(path: Path, status: str, done: int, total: int) -> None:
         if verbose or status not in ("unchanged",):
             color = {"added": "green", "updated": "yellow", "moved": "cyan", "error": "red"}.get(status)
-            click.echo(f"{click.style(f'{status:>9}', fg=color)}  {path}")
+            click.echo(f"{click.style(f'{status:>9}', fg=color)}  [{done}/{total}] {path}")
 
     result = catalog.scan(c.conn, paths, force=force, on_bag=on_bag)
     for path, message in result.errors:
@@ -62,6 +73,41 @@ def scan(c: Ctx, paths: tuple[Path, ...], force: bool, verbose: bool) -> None:
         f"added {result.added}, updated {result.updated}, moved {result.moved}, "
         f"unchanged {result.unchanged}, missing {result.missing}, errors {len(result.errors)}"
     )
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def roots(ctx: click.Context) -> None:
+    """List registered roots (directories scanned by `bagarium scan` without PATHS)."""
+    if ctx.invoked_subcommand:
+        return
+    c: Ctx = ctx.obj
+    rows = catalog.list_roots(c.conn)
+    if not rows:
+        click.echo("no roots registered", err=True)
+    for r in rows:
+        status = "" if r["exists"] else click.style("  [not found]", fg="red")
+        click.echo(f"{r['bag_count']:>5} bags  last scan {r['last_scanned_at'] or 'never':<25}  {r['path']}{status}")
+
+
+@roots.command(name="add")
+@click.argument("paths", nargs=-1, required=True, type=click.Path(path_type=Path))
+@pass_ctx
+def roots_add(c: Ctx, paths: tuple[Path, ...]) -> None:
+    """Register directories as roots (does not scan)."""
+    try:
+        for path in catalog.add_roots(c.conn, paths):
+            click.echo(f"added {path}")
+    except ValueError as e:
+        raise click.ClickException(str(e))
+
+
+@roots.command(name="rm")
+@click.argument("paths", nargs=-1, required=True, type=click.Path(path_type=Path))
+@pass_ctx
+def roots_rm(c: Ctx, paths: tuple[Path, ...]) -> None:
+    """Unregister roots. Indexed bags, tags and notes are kept."""
+    click.echo(f"removed {catalog.remove_roots(c.conn, paths)} root(s)")
 
 
 def _time_option(name: str, end: bool):

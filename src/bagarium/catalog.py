@@ -28,31 +28,51 @@ def _now() -> str:
 # ---------------------------------------------------------------- scanning
 
 
+ProgressCallback = Callable[[Path, str, int, int], None]
+
+
 def scan(
     conn: sqlite3.Connection,
     roots: Iterable[str | Path],
     force: bool = False,
-    on_bag: Callable[[Path, str], None] | None = None,
+    on_bag: ProgressCallback | None = None,
 ) -> ScanResult:
     """Index every bag under ``roots``.
 
     Unchanged bags (same size and mtime) are skipped unless ``force``.
     Previously indexed bags under a root that no longer exist are flagged as
     missing; their tags and notes are kept so they survive a rescan.
+
+    ``on_bag(path, status, done, total)`` is called after each bag. Each bag is
+    committed on its own, so an exception raised from the callback aborts the
+    scan while keeping what was indexed so far (missing bags are then not
+    flagged, since the scan was incomplete).
     """
     result = ScanResult()
+    # (root, all bags under root, bags to index here: not already planned by an overlapping root)
+    plan: list[tuple[Path, list[Path], list[Path]]] = []
+    seen: set[Path] = set()
     for root in roots:
         root = Path(root).expanduser().resolve()
         if not root.exists():
             result.errors.append((root, "path does not exist"))
             continue
-        found: set[str] = set()
-        for bag_path in scanner.discover(root):
-            found.add(str(bag_path))
+        found = list(scanner.discover(root))
+        paths = [p for p in found if p not in seen]
+        seen.update(paths)
+        plan.append((root, found, paths))
+
+    total = sum(len(paths) for _, _, paths in plan)
+    done = 0
+    for root, found, paths in plan:
+        for bag_path in paths:
             status = _index_one(conn, bag_path, force, result)
+            conn.commit()
+            done += 1
             if on_bag:
-                on_bag(bag_path, status)
-        result.missing += _mark_missing(conn, root, found)
+                on_bag(bag_path, status, done, total)
+        result.missing += _mark_missing(conn, root, {str(p) for p in found})
+        conn.execute("UPDATE roots SET last_scanned_at = ? WHERE path = ?", (_now(), str(root)))
         conn.commit()
     return result
 
@@ -137,6 +157,44 @@ def _mark_missing(conn: sqlite3.Connection, root: Path, found: set[str]) -> int:
     gone = [r["id"] for r in rows if r["path"] not in found and not Path(r["path"]).exists()]
     conn.executemany("UPDATE bags SET missing = 1 WHERE id = ?", [(i,) for i in gone])
     return len(gone)
+
+
+# ---------------------------------------------------------------- roots
+
+
+def add_roots(conn: sqlite3.Connection, paths: Iterable[str | Path]) -> list[Path]:
+    """Register directories to scan. Returns the resolved paths."""
+    added = []
+    for path in paths:
+        path = Path(path).expanduser().resolve()
+        if not path.is_dir():
+            raise ValueError(f"not a directory: {path}")
+        conn.execute("INSERT OR IGNORE INTO roots (path, added_at) VALUES (?, ?)", (str(path), _now()))
+        added.append(path)
+    conn.commit()
+    return added
+
+
+def remove_roots(conn: sqlite3.Connection, paths: Iterable[str | Path]) -> int:
+    """Unregister directories. Indexed bags, tags and notes are kept."""
+    n = 0
+    for path in paths:
+        n += conn.execute("DELETE FROM roots WHERE path = ?", (str(Path(path).expanduser().resolve()),)).rowcount
+    conn.commit()
+    return n
+
+
+def list_roots(conn: sqlite3.Connection) -> list[dict]:
+    """Registered roots with the number of (non-missing) bags indexed under each."""
+    roots = []
+    for row in conn.execute("SELECT * FROM roots ORDER BY path").fetchall():
+        prefix = row["path"].rstrip("/") + "/"
+        count = conn.execute(
+            "SELECT COUNT(*) FROM bags WHERE missing = 0 AND (path = ? OR substr(path, 1, ?) = ?)",
+            (row["path"], len(prefix), prefix),
+        ).fetchone()[0]
+        roots.append({**dict(row), "bag_count": count, "exists": Path(row["path"]).is_dir()})
+    return roots
 
 
 # ---------------------------------------------------------------- queries

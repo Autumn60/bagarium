@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Scan · bagarium{% endblock %}
+{% block content %}
+<h1>Scan</h1>
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+
+<section class="card" id="scan-status" data-running="{{ 'true' if job.running else 'false' }}">
+  {% if job.running %}
+    <div class="status-line">
+      <strong id="status-title">{% if job.cancelling %}Cancelling…{% else %}Scanning…{% endif %}</strong>
+      <span id="progress-text" class="muted">{{ job.done }} / {{ job.total }}</span>
+    </div>
+    <progress id="progress" max="{{ job.total or 1 }}" value="{{ job.done }}"></progress>
+    <div class="muted current" id="current">{{ job.current or "looking for bags…" }}</div>
+    <div class="status-line">
+      <span id="counts" class="muted">added {{ job.added }} · updated {{ job.updated }} · moved {{ job.moved }} · unchanged {{ job.unchanged }} · errors {{ job.error_count }}</span>
+      <form method="post" action="/scan/cancel" class="inline"><button class="secondary">Cancel</button></form>
+    </div>
+  {% elif job.outcome %}
+    <div class="status-line">
+      <strong class="{{ 'error' if job.outcome == 'failed' }}">Last scan {{ job.outcome }}</strong>
+      <span class="muted">{{ job.finished_at }}</span>
+    </div>
+    <div>added {{ job.added }} · updated {{ job.updated }} · moved {{ job.moved }} · unchanged {{ job.unchanged }} · missing {{ job.missing }} · errors {{ job.error_count }}</div>
+    {% if job.errors %}
+      <details>
+        <summary>Errors{% if job.error_count > job.errors|length %} (first {{ job.errors|length }}){% endif %}</summary>
+        <ul class="errors">{% for e in job.errors %}<li><code>{{ e.path }}</code> {{ e.message }}</li>{% endfor %}</ul>
+      </details>
+    {% endif %}
+  {% else %}
+    <div class="muted">No scan has run since the server started.</div>
+  {% endif %}
+</section>
+
+<section>
+  <div class="section-head">
+    <h2>Folders</h2>
+    {% if roots %}
+    <div class="actions">
+      <form method="post" action="/scan/run" class="inline">
+        <button {% if job.running %}disabled{% endif %}>Scan all</button>
+      </form>
+      <form method="post" action="/scan/run" class="inline">
+        <input type="hidden" name="force" value="true">
+        <button class="secondary" {% if job.running %}disabled{% endif %} title="Re-read every bag even if unchanged">Rescan all</button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if roots %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Path</th><th class="num">Bags</th><th>Last scan</th><th></th></tr></thead>
+    <tbody>
+    {% for r in roots %}
+      <tr>
+        <td><code class="path">{{ r.path }}</code>{% if not r.exists %} <span class="badge err">not found</span>{% endif %}</td>
+        <td class="num"><a href="/?q={{ r.path | urlencode }}">{{ r.bag_count }}</a></td>
+        <td class="nowrap">{{ r.last_scanned_at or "never" }}</td>
+        <td class="actions">
+          <form method="post" action="/scan/run" class="inline">
+            <input type="hidden" name="root" value="{{ r.path }}">
+            <button {% if job.running or not r.exists %}disabled{% endif %}>Scan</button>
+          </form>
+          <form method="post" action="/scan/run" class="inline">
+            <input type="hidden" name="root" value="{{ r.path }}">
+            <input type="hidden" name="force" value="true">
+            <button class="secondary" {% if job.running or not r.exists %}disabled{% endif %} title="Re-read every bag even if unchanged">Rescan</button>
+          </form>
+          <form method="post" action="/scan/roots/remove" class="inline"
+                onsubmit="return confirm('Stop scanning this folder? Indexed bags, tags and notes are kept.')">
+            <input type="hidden" name="path" value="{{ r.path }}">
+            <button class="danger">Remove</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">No folders registered yet.</p>
+  {% endif %}
+
+  <form method="post" action="/scan/roots" class="row">
+    <input type="text" name="path" placeholder="/path/to/rosbags" required>
+    <button type="submit">Add folder</button>
+  </form>
+  <p class="muted hint">Folders are scanned recursively. Removing a folder only stops scanning it; bags already indexed stay in the catalog.</p>
+</section>
+
+<script>
+  (() => {
+    const box = document.getElementById("scan-status");
+    if (box.dataset.running !== "true") return;
+    const $ = id => document.getElementById(id);
+    const poll = async () => {
+      let s;
+      try { s = await (await fetch("/api/scan")).json(); } catch { return setTimeout(poll, 2000); }
+      if (!s.running) return location.replace("/scan");
+      $("status-title").textContent = s.cancelling ? "Cancelling…" : "Scanning…";
+      $("progress-text").textContent = `${s.done} / ${s.total}`;
+      $("progress").max = s.total || 1;
+      $("progress").value = s.done;
+      $("current").textContent = s.current || "looking for bags…";
+      $("counts").textContent =
+        `added ${s.added} · updated ${s.updated} · moved ${s.moved} · unchanged ${s.unchanged} · errors ${s.error_count}`;
+      setTimeout(poll, 1000);
+    };
+    setTimeout(poll, 1000);
+  })();
+</script>
+{% endblock %}

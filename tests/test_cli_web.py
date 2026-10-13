@@ -31,6 +31,22 @@ def test_cli_flow(tmp_path, bag_root):
     assert result.exit_code != 0 and "not found" in result.output
 
 
+def test_cli_roots(tmp_path, bag_root):
+    dbp = tmp_path / "c.db"
+    result = CliRunner().invoke(main, ["--db", str(dbp), "scan"])
+    assert result.exit_code != 0 and "no roots registered" in result.output
+
+    run(dbp, "scan", "--no-register", bag_root / "loose")
+    assert "no roots" in CliRunner().invoke(main, ["--db", str(dbp), "roots"]).output
+
+    run(dbp, "scan", bag_root)
+    assert str(bag_root) in run(dbp, "roots")
+    assert "unchanged 4" in run(dbp, "scan")  # no args: registered roots
+    run(dbp, "roots", "rm", bag_root)
+    run(dbp, "roots", "add", bag_root / "loose")
+    assert "loose" in run(dbp, "roots")
+
+
 def test_web(tmp_path, bag_root):
     dbp = tmp_path / "c.db"
     run(dbp, "scan", bag_root)
@@ -58,3 +74,63 @@ def test_web(tmp_path, bag_root):
 
     evil = client.post(f"/bags/{bag_id}/note", data={"note": "pwned"}, headers={"origin": "http://evil.example"})
     assert evil.status_code == 403
+
+
+def wait_for_scan(client, timeout=10.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while (status := client.get("/api/scan").json())["running"]:
+        assert time.monotonic() < deadline, "scan did not finish"
+        time.sleep(0.05)
+    return status
+
+
+def test_web_scan(tmp_path, bag_root):
+    client = TestClient(create_app(tmp_path / "c.db"))
+    assert "No folders registered" in client.get("/scan").text
+
+    assert "registered" in client.post("/scan/run", data={}).text  # nothing registered yet
+    assert "not a directory" in client.post("/scan/roots", data={"path": str(bag_root / "nope")}).text
+    client.post("/scan/roots", data={"path": str(bag_root)})
+    assert "not a registered root" in client.post("/scan/run", data={"root": "/etc"}).text
+
+    client.post("/scan/run", data={"root": str(bag_root)})
+    status = wait_for_scan(client)
+    assert status["outcome"] == "completed" and status["added"] == 4 and status["total"] == 4
+    page = client.get("/scan").text
+    assert "Last scan completed" in page and "added 4" in page
+    assert len(client.get("/api/bags").json()) == 4
+
+    client.post("/scan/run", data={"force": "true"})
+    assert wait_for_scan(client)["updated"] == 4
+
+    client.post("/scan/roots/remove", data={"path": str(bag_root)})
+    assert "No folders registered" in client.get("/scan").text
+    assert len(client.get("/api/bags").json()) == 4
+
+
+def test_web_scan_cancel(tmp_path, bag_root):
+    import threading
+
+    app = create_app(tmp_path / "c.db")
+    job = app.state.scan_job
+    gate = threading.Event()
+    original = job._on_bag
+
+    def slow_on_bag(*args):
+        gate.wait(5)
+        original(*args)
+
+    job._on_bag = slow_on_bag
+    client = TestClient(app)
+    client.post("/scan/roots", data={"path": str(bag_root)})
+    client.post("/scan/run", data={})
+    assert client.get("/api/scan").json()["running"]
+    assert "already running" in client.post("/scan/run", data={}).text
+    assert "Scanning" in client.get("/scan").text
+
+    client.post("/scan/cancel")
+    gate.set()
+    status = wait_for_scan(client)
+    assert status["outcome"] == "cancelled" and status["done"] == 1

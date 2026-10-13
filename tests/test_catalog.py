@@ -97,3 +97,34 @@ def test_tags_lifecycle(conn, bag_root):
 def test_parse_time_rejects_garbage():
     with pytest.raises(ValueError):
         catalog.parse_time("yesterday")
+
+
+def test_roots(conn, bag_root):
+    catalog.add_roots(conn, [bag_root, bag_root])
+    with pytest.raises(ValueError):
+        catalog.add_roots(conn, [bag_root / "nope"])
+    [root] = catalog.list_roots(conn)
+    assert root["path"] == str(bag_root) and root["bag_count"] == 0 and root["last_scanned_at"] is None
+
+    catalog.scan(conn, [bag_root])
+    [root] = catalog.list_roots(conn)
+    assert root["bag_count"] == 4 and root["last_scanned_at"]
+
+    assert catalog.remove_roots(conn, [bag_root]) == 1
+    assert catalog.list_roots(conn) == [] and len(catalog.search(conn)) == 4
+
+
+def test_overlapping_roots_index_each_bag_once(conn, bag_root):
+    seen = []
+    r = catalog.scan(conn, [bag_root, bag_root / "loose"], on_bag=lambda p, s, d, t: seen.append((p, d, t)))
+    assert r.added == 4 and len(seen) == 4 and seen[-1][1:] == (4, 4)
+
+
+def test_abort_keeps_partial_progress(conn, bag_root):
+    def stop_after_two(path, status, done, total):
+        if done == 2:
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        catalog.scan(conn, [bag_root], on_bag=stop_after_two)
+    assert len(catalog.search(conn, include_missing=True)) == 2
