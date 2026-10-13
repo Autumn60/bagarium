@@ -1,0 +1,66 @@
+{# Job cards. Cards of queued/running jobs are kept up to date by /static/jobs.js. #}
+
+{% macro stats_text(stats) %}{% for k, v in stats.items() %}{{ k }} {{ v | count }}{{ " · " if not loop.last }}{% endfor %}{% endmacro %}
+
+{% macro progress_text(job) %}{% if job.kind == "scan" %}{{ job.done }} / {{ job.total }}{% else %}{{ (100 * job.done / (job.total or 1)) | round | int }}%{% endif %}{% endmacro %}
+
+{% macro cancel_button(job, next, label="Cancel") %}
+  <form method="post" action="/jobs/{{ job.id }}/cancel" class="inline">
+    <input type="hidden" name="next" value="{{ next }}">
+    <button class="secondary">{{ label }}</button>
+  </form>
+{% endmacro %}
+
+{% macro job_card(job, next="/jobs") %}
+<section class="card job" data-job-id="{{ job.id }}" data-state="{{ job.state }}" data-cancelling="{{ 'true' if job.cancelling else '' }}" data-kind="{{ job.kind }}">
+  {% if job.state == "running" %}
+    <div class="status-line">
+      <strong>#{{ job.id }} {{ job.label }}{% if job.cancelling %} (cancelling…){% endif %}</strong>
+      <span data-f="progress-text" class="muted">{{ progress_text(job) }}</span>
+    </div>
+    <progress data-f="progress" max="{{ job.total or 1 }}" value="{{ job.done }}"></progress>
+    <div class="muted current" data-f="current">{{ job.current or "starting…" }}</div>
+    <div class="status-line">
+      <span data-f="stats" class="muted">{{ stats_text(job.stats) }}</span>
+      {{ cancel_button(job, next) }}
+    </div>
+  {% elif job.state == "queued" %}
+    <div class="status-line">
+      <span><strong>#{{ job.id }} {{ job.label }}</strong> <span class="muted">queued {{ job.queued_at[11:19] }}</span></span>
+      {{ cancel_button(job, next, "Remove") }}
+    </div>
+  {% else %}
+    <details {% if job.state == "failed" %}open{% endif %}>
+      <summary class="status-line">
+        <span><strong>#{{ job.id }} {{ job.label }}</strong>: <span class="state-{{ job.state }}">{{ job.state }}</span>
+          {% if job.stats %}<span class="muted"> · {{ stats_text(job.stats) }}</span>{% endif %}</span>
+        <span class="muted">{{ (job.finished_at or "")[11:19] }}</span>
+      </summary>
+      {% if job.error %}<div class="error">{{ job.error }}</div>{% endif %}
+      {% if job.errors %}
+        <ul class="errors">{% for e in job.errors %}<li><code>{{ e.path }}</code> {{ e.message }}</li>{% endfor %}</ul>
+      {% endif %}
+      {% if job.results %}
+        <div class="table-wrap">
+        <table>
+          <thead><tr><th>Source</th><th>Status</th><th>Output</th></tr></thead>
+          <tbody>
+          {% for r in job.results %}
+            <tr>
+              <td><a href="/bags/{{ r.source_id }}"><code class="path">{{ r.source }}</code></a></td>
+              <td class="nowrap"><span class="status-{{ r.status }}">{{ "not run" if r.status == "pending" else r.status }}</span></td>
+              <td>
+                {% if r.result_bag_id %}<a href="/bags/{{ r.result_bag_id }}"><code class="path">{{ r.output }}</code></a>
+                {% elif r.status == "done" %}<code class="path">{{ r.output }}</code>{% endif %}
+                {% if r.message %}<div class="muted">{{ r.message }}</div>{% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        </div>
+      {% endif %}
+    </details>
+  {% endif %}
+</section>
+{% endmacro %}

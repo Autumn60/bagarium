@@ -79,7 +79,7 @@
     <div class="status-line">
       <span class="muted"><span id="selected-count">{{ topics | length }}</span> of {{ topics | length }} topics selected ·
         each output is named <code>&lt;bag&gt;_&lt;suffix&gt;</code> · bags without selected topics are skipped</span>
-      <button type="submit" form="extract-form" {% if job.running %}disabled title="another job is running"{% endif %}>Extract</button>
+      <button type="submit" form="extract-form">Queue extraction</button>
     </div>
   </div>
 </section>

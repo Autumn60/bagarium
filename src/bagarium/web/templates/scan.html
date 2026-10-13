@@ -4,7 +4,9 @@
 <h1>Scan</h1>
 {% if error %}<p class="flash error">{{ error }}</p>{% endif %}
 
-{% if job.kind %}{% set next = "/scan" %}{% include "_job.html" %}{% endif %}
+{% if scan_jobs %}
+<p class="card">{{ scan_jobs | length }} scan job{{ "s" if scan_jobs | length != 1 }} queued or running · <a href="/jobs">see Jobs</a></p>
+{% endif %}
 
 <section>
   <div class="section-head">
@@ -12,11 +14,11 @@
     {% if roots %}
     <div class="actions">
       <form method="post" action="/scan/run" class="inline">
-        <button {% if job.running %}disabled{% endif %}>Scan all</button>
+        <button>Scan all</button>
       </form>
       <form method="post" action="/scan/run" class="inline">
         <input type="hidden" name="force" value="true">
-        <button class="secondary" {% if job.running %}disabled{% endif %} title="Re-read every bag even if unchanged">Rescan all</button>
+        <button class="secondary" title="Re-read every bag even if unchanged">Rescan all</button>
       </form>
     </div>
     {% endif %}
@@ -35,12 +37,12 @@
         <td class="actions">
           <form method="post" action="/scan/run" class="inline">
             <input type="hidden" name="root" value="{{ r.path }}">
-            <button {% if job.running or not r.exists %}disabled{% endif %}>Scan</button>
+            <button {% if not r.exists %}disabled{% endif %}>Scan</button>
           </form>
           <form method="post" action="/scan/run" class="inline">
             <input type="hidden" name="root" value="{{ r.path }}">
             <input type="hidden" name="force" value="true">
-            <button class="secondary" {% if job.running or not r.exists %}disabled{% endif %} title="Re-read every bag even if unchanged">Rescan</button>
+            <button class="secondary" {% if not r.exists %}disabled{% endif %} title="Re-read every bag even if unchanged">Rescan</button>
           </form>
           <form method="post" action="/scan/roots/remove" class="inline"
                 onsubmit="return confirm('Stop scanning this folder? Indexed bags, tags and notes are kept.')">

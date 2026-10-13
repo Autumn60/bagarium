@@ -68,7 +68,10 @@ def parse_bag_time(text: str, bag_start_ns: int | None) -> int:
         if bag_start_ns is None:
             raise ValueError("bag has no start time; use an absolute time")
         return bag_start_ns + round(seconds * 1e9)
-    return catalog.parse_time(text)
+    try:
+        return catalog.parse_time(text)
+    except ValueError:
+        raise ValueError(f"invalid time: {text!r}") from None
 
 
 def select_topics(names: Iterable[str], include: Iterable[str] = (), exclude: Iterable[str] = ()) -> list[str]:
@@ -444,23 +447,29 @@ def plan_batch(
     output_dir: str | Path | None = None,
     suffix: str | None = None,
     output: str | Path | None = None,
+    taken: Iterable[Path] = (),
 ) -> list[BatchItem]:
     """Decide output paths and time ranges for each bag, and which bags to skip.
 
     Times are resolved per bag, so offsets ("60", "1:30") count from each bag's
     own start. ``output`` names the exact output and is only valid for one bag;
-    otherwise names are made unique within the batch and on disk.
+    otherwise names are made unique within the batch, on disk and against
+    ``taken`` (outputs other queued jobs will create).
     """
     bags = [dict(b) for b in bags]
     if output is not None and len(bags) != 1:
         raise ValueError("an exact output path needs exactly one bag; use an output directory")
     include, exclude = list(include), list(exclude)
     suffix = suffix or default_suffix()
-    taken: set[Path] = set()
+    taken = set(taken)
     items = []
     for bag in bags:
         if output is not None:
             out = Path(output).expanduser().resolve()
+            if out in taken:
+                item = BatchItem(bag, out, status="skipped", message=f"output is already used by a queued job: {out}")
+                items.append(item)
+                continue
         else:
             out = _unique(default_output_path(Path(bag["path"]), output_dir, suffix).expanduser().resolve(), taken)
         item = BatchItem(bag, out)

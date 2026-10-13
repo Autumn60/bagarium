@@ -77,13 +77,16 @@ def test_web(tmp_path, bag_root):
 
 
 def wait_for_job(client, timeout=10.0):
+    """Wait until the queue is idle and return the most recently submitted job."""
     import time
 
     deadline = time.monotonic() + timeout
-    while (status := client.get("/api/job").json())["running"]:
-        assert time.monotonic() < deadline, "job did not finish"
+    while True:
+        jobs = client.get("/api/jobs").json()
+        if not any(j["state"] in ("queued", "running") for j in jobs):
+            return max(jobs, key=lambda j: j["id"])
+        assert time.monotonic() < deadline, "jobs did not finish"
         time.sleep(0.05)
-    return status
 
 
 def test_web_scan(tmp_path, bag_root):
@@ -97,9 +100,9 @@ def test_web_scan(tmp_path, bag_root):
 
     client.post("/scan/run", data={"root": str(bag_root)})
     status = wait_for_job(client)
-    assert status["outcome"] == "completed" and status["stats"]["added"] == 4 and status["total"] == 4
-    page = client.get("/scan").text
-    assert ": completed" in page and "added 4" in page
+    assert status["state"] == "completed" and status["stats"]["added"] == 4 and status["total"] == 4
+    page = client.get("/jobs").text
+    assert "completed" in page and "added 4" in page
     assert len(client.get("/api/bags").json()) == 4
 
     client.post("/scan/run", data={"force": "true"})
@@ -110,7 +113,7 @@ def test_web_scan(tmp_path, bag_root):
     assert len(client.get("/api/bags").json()) == 4
 
 
-def test_web_scan_cancel(tmp_path, bag_root, monkeypatch):
+def test_web_queue_and_cancel(tmp_path, bag_root, monkeypatch):
     import threading
 
     from bagarium import catalog
@@ -125,15 +128,26 @@ def test_web_scan_cancel(tmp_path, bag_root, monkeypatch):
     monkeypatch.setattr(catalog, "_index_one", slow_index_one)
     client = TestClient(create_app(tmp_path / "c.db"))
     client.post("/scan/roots", data={"path": str(bag_root)})
+    assert client.post("/scan/run", data={}).url.path == "/jobs"
+    client.post("/scan/run", data={"force": "true"})  # queued behind the first
     client.post("/scan/run", data={})
-    assert client.get("/api/job").json()["running"]
-    assert "already running" in client.post("/scan/run", data={}).text
-    assert "Cancel" in client.get("/scan").text
+    first, second, third = sorted(client.get("/api/jobs").json(), key=lambda j: j["id"])
+    assert (first["state"], second["state"], third["state"]) == ("running", "queued", "queued")
+    page = client.get("/jobs").text
+    assert "Queued" in page and "Remove" in page and 'class="count">3<' in page
 
-    client.post("/jobs/cancel", data={"next": "/scan"})
+    client.post(f"/jobs/{second['id']}/cancel")  # drop a queued job
+    assert client.get(f"/api/jobs/{second['id']}").json()["state"] == "cancelled"
+    client.post(f"/jobs/{first['id']}/cancel")  # stop the running one
     gate.set()
-    status = wait_for_job(client)
-    assert status["outcome"] == "cancelled" and status["done"] == 1
+    wait_for_job(client)
+    states = {j["id"]: j for j in client.get("/api/jobs").json()}
+    assert states[first["id"]]["state"] == "cancelled" and states[first["id"]]["done"] == 1
+    assert states[third["id"]]["state"] == "completed"  # the queue moved on
+
+    client.post("/jobs/clear")
+    assert client.get("/api/jobs").json() == []
+    assert client.get("/api/jobs/999").status_code == 404
 
 
 def test_web_extract(tmp_path, bag_root):
@@ -154,9 +168,9 @@ def test_web_extract(tmp_path, bag_root):
 
     client.post(url, data={"topic": ["/tf"], "start": "0.5", "end": "1:00", "output": str(out)})
     status = wait_for_job(client)
-    assert status["outcome"] == "completed", status
+    assert status["state"] == "completed", status
     assert status["stats"]["messages"] == 16  # /tf at 0.1 s steps from 0.5 s to 2.0 s
-    new = client.get(f"/api/bags/{status['result_bag_id']}").json()
+    new = client.get(f"/api/bags/{status['results'][0]['result_bag_id']}").json()
     assert new["path"] == str(out) and [t["name"] for t in new["topics"]] == ["/tf"]
     assert "Extracted from" in new["note"]
     assert f'href="/bags/{new["id"]}"' in client.get(f"/bags/{bag_id}").text
@@ -185,10 +199,39 @@ def test_web_batch_extract(tmp_path, bag_root):
     r = post(topic=["/tf", "/odom"], start="0", end="0.5", output_mode="dir", output_dir=str(out_dir), suffix="w")
     assert r.url.path == "/jobs"
     status = wait_for_job(client)
-    assert status["outcome"] == "completed", status
+    assert status["state"] == "completed", status
     assert status["stats"] == {"done": 2, "skipped": 1, "failed": 0, "messages": 12}
     assert sorted(p.name for p in out_dir.iterdir()) == ["old_w", "run_lidar_w"]
     results = {r["source_id"]: r for r in status["results"]}
     assert results[ids["camera.mcap"]]["status"] == "skipped"
     jobs_page = client.get("/jobs").text
     assert "run_lidar_w" in jobs_page and "no topics match" in jobs_page
+
+
+def test_queued_extractions_do_not_collide(tmp_path, bag_root, monkeypatch):
+    import threading
+
+    from bagarium import extract
+
+    gate = threading.Event()
+    original = extract.extract_bag
+
+    def slow_extract_bag(*args, **kwargs):
+        gate.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(extract, "extract_bag", slow_extract_bag)
+    client = TestClient(create_app(tmp_path / "c.db"))
+    client.post("/scan/roots", data={"path": str(bag_root)})
+    client.post("/scan/run", data={})
+    wait_for_job(client)
+    bag_id = next(b["id"] for b in client.get("/api/bags").json() if b["name"] == "run_lidar")
+    out = tmp_path / "outs"
+    form = {"bag": [bag_id], "topic": ["/tf"], "output_mode": "dir", "output_dir": str(out), "suffix": "same"}
+    client.post("/extract", data=form)
+    client.post("/extract", data=form)  # same names, queued while the first has not written anything
+    exact = {"topic": ["/tf"], "output": str(out / "run_lidar_same")}
+    assert "already used by a queued job" in client.post(f"/bags/{bag_id}/extract", data=exact).text
+    gate.set()
+    wait_for_job(client)
+    assert sorted(p.name for p in out.iterdir()) == ["run_lidar_same", "run_lidar_same_2"]

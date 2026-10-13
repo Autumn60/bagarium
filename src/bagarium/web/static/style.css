@@ -110,3 +110,12 @@ div.extract label.wide input[type=text] { flex: 1; }
 .status-skipped, .status-pending { color: var(--warn); }
 .status-failed { color: var(--err); }
 .card .table-wrap { margin-top: 8px; }
+
+.count { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 999px; background: var(--accent);
+  color: #fff; font-size: 11px; text-align: center; line-height: 18px; }
+.card.job details > summary { cursor: pointer; list-style: none; }
+.card.job details > summary::-webkit-details-marker { display: none; }
+.card.job details[open] > summary { margin-bottom: 8px; }
+.state-completed { color: var(--accent); }
+.state-cancelled { color: var(--warn); }
+.state-failed { color: var(--err); }

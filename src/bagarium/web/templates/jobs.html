@@ -1,10 +1,34 @@
 {% extends "base.html" %}
+{% from "_jobs.html" import job_card %}
 {% block title %}Jobs · bagarium{% endblock %}
 {% block content %}
 <h1>Jobs</h1>
-{% if job.kind %}
-  {% set next = "/jobs" %}{% include "_job.html" %}
-{% else %}
-  <p class="empty">No job has run since the server started.</p>
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+{% set running = jobs | selectattr("state", "equalto", "running") | list %}
+{% set queued = jobs | selectattr("state", "equalto", "queued") | list %}
+{% set finished = jobs | rejectattr("state", "in", ["queued", "running"]) | list %}
+
+{% if not jobs %}
+  <p class="empty">No jobs yet. Scans and extractions you start are queued here and run one at a time.</p>
 {% endif %}
+
+{% if running %}
+  <h2>Running</h2>
+  {% for j in running %}{{ job_card(j) }}{% endfor %}
+{% endif %}
+
+{% if queued %}
+  <h2>Queued <span class="muted">({{ queued | length }})</span></h2>
+  {% for j in queued %}{{ job_card(j) }}{% endfor %}
+{% endif %}
+
+{% if finished %}
+  <div class="section-head">
+    <h2>Finished</h2>
+    <form method="post" action="/jobs/clear" class="inline"><button class="secondary">Clear</button></form>
+  </div>
+  {% for j in finished %}{{ job_card(j) }}{% endfor %}
+{% endif %}
+
+<script src="/static/jobs.js"></script>
 {% endblock %}

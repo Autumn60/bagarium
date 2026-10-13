@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_jobs.html" import job_card %}
 {% block title %}{{ bag.name }} · bagarium{% endblock %}
 {% block content %}
 <p><a href="/">← all bags</a></p>
@@ -8,7 +9,7 @@
 </h1>
 
 {% if error %}<p class="flash error">{{ error }}</p>{% endif %}
-{% if job.kind == "extract" and job.bag_id == bag.id %}{% set next = "/bags/" ~ bag.id %}{% include "_job.html" %}{% endif %}
+{% for j in bag_jobs %}{{ job_card(j, "/bags/" ~ bag.id) }}{% endfor %}
 
 <dl class="meta">
   <dt>Path</dt><dd><code class="path">{{ bag.path }}</code> <button type="button" class="copy" data-copy="{{ bag.path }}">copy</button></dd>
@@ -92,7 +93,7 @@
     <label class="wide">Output <input type="text" name="output" value="{{ default_output }}"></label>
     <div class="status-line">
       <span class="muted"><span id="selected-count">{{ topics | length }}</span> of {{ topics | length }} topics selected · written as a new {{ bag.storage }} bag, then added to the catalog</span>
-      <button type="submit" {% if job.running %}disabled title="another job is running"{% endif %}>Extract</button>
+      <button type="submit">Queue extraction</button>
     </div>
   </form>
 </section>
@@ -106,4 +107,5 @@
   }));
 </script>
 <script src="/static/topic-select.js"></script>
+<script src="/static/jobs.js"></script>
 {% endblock %}

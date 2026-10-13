@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import __version__, catalog, db, extract, fmt
-from .jobs import MAX_ERRORS, JobRunner
+from .jobs import MAX_ERRORS, Job, JobQueue
 
 HERE = Path(__file__).parent
 
@@ -28,7 +28,8 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
     )
     templates.env.globals.update(duration=fmt.duration, version=__version__)
 
-    job = app.state.jobs = JobRunner()
+    jobs = app.state.jobs = JobQueue()
+    templates.env.globals.update(active_jobs=jobs.active_count)
 
     def get_conn() -> Iterator[sqlite3.Connection]:
         conn = db.connect(db_path)
@@ -108,7 +109,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             "tags": catalog.tags_of(conn, [bag_id])[bag_id],
             "topics": catalog.topics_of(conn, bag_id),
             "all_tags": catalog.all_tags(conn),
-            "job": job.status(),
+            "bag_jobs": [j for j in jobs.list() if j.get("bag_id") == bag_id][:1],
             "error": error,
             "default_output": extract.default_output_path(Path(bag["path"])),
         })
@@ -135,17 +136,27 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
     # ------------------------------------------------------------ jobs
 
     def redirect(url: str, error: str = "") -> RedirectResponse:
-        return RedirectResponse(url + ("?" + urlencode({"error": error}) if error else ""), status_code=303)
+        sep = "&" if "?" in url else "?"
+        return RedirectResponse(url + (sep + urlencode({"error": error}) if error else ""), status_code=303)
 
-    @app.post("/jobs/cancel", dependencies=[Depends(same_origin)])
-    def cancel_job(next: str = Form("/scan")):
-        job.cancel()
-        return redirect(next if next.startswith("/") and not next.startswith("//") else "/scan")
+    @app.get("/jobs", response_class=HTMLResponse)
+    def jobs_page(request: Request):
+        return templates.TemplateResponse(request, "jobs.html", {"jobs": jobs.list()})
+
+    @app.post("/jobs/{job_id}/cancel", dependencies=[Depends(same_origin)])
+    def cancel_job(job_id: int, next: str = Form("/jobs")):
+        jobs.cancel(job_id)
+        return redirect(next if next.startswith("/") and not next.startswith("//") else "/jobs")
+
+    @app.post("/jobs/clear", dependencies=[Depends(same_origin)])
+    def clear_jobs():
+        jobs.clear_finished()
+        return redirect("/jobs")
 
     # ------------------------------------------------------------ scanning
 
     def scan_target(roots: list[str], force: bool):
-        def run(j: JobRunner) -> dict:
+        def run(j: Job) -> dict:
             j.set_stats(added=0, updated=0, moved=0, unchanged=0, errors=0)
 
             def on_bag(path: Path, status: str, done: int, total: int) -> None:
@@ -166,7 +177,8 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
     @app.get("/scan", response_class=HTMLResponse)
     def scan_page(request: Request, error: str = "", conn: sqlite3.Connection = Depends(get_conn)):
         return templates.TemplateResponse(request, "scan.html", {
-            "roots": catalog.list_roots(conn), "job": job.status(), "error": error,
+            "roots": catalog.list_roots(conn), "error": error,
+            "scan_jobs": [j for j in jobs.list() if j["kind"] == "scan" and j["state"] in ("queued", "running")],
         })
 
     @app.post("/scan/roots", dependencies=[Depends(same_origin)])
@@ -193,11 +205,42 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         label = f"Scan {roots[0]}" if len(roots) == 1 else f"Scan {len(roots)} folders"
         if force:
             label = "Re" + label[0].lower() + label[1:]
-        if not job.start("scan", label, scan_target(roots, force)):
-            return redirect("/scan", "another job is already running")
-        return redirect("/scan")
+        jobs.submit("scan", label, scan_target(roots, force))
+        return redirect("/jobs")
 
     # ------------------------------------------------------------ extraction
+
+    def result_rows(items: list[extract.BatchItem]) -> list[dict]:
+        return [{
+            "source": i.bag["path"], "source_id": i.bag["id"], "status": i.status,
+            "message": i.message, "output": str(i.output), "result_bag_id": i.result_id,
+        } for i in items]
+
+    def submit_extract(label: str, items: list[extract.BatchItem], include: list[str], **info) -> int:
+        pending = [i for i in items if i.status == "pending"]
+
+        def run(j: Job) -> dict:
+            j.update(total=1000 * len(pending))
+            j.set_stats(done=0, skipped=len(items) - len(pending), failed=0, messages=0)
+
+            def on_progress(k, n, item, frac, written):
+                j.update(done=round((k + frac) * 1000), current=f"[{k + 1}/{n}] {item.bag['path']}")
+                j.check_cancelled()
+
+            def on_item(item):
+                j.bump(item.status)
+                j.bump("messages", item.message_count)
+                j.update(results=result_rows(items))
+
+            c = db.connect(db_path)
+            try:
+                extract.run_batch(c, items, include, (), on_progress, on_item)
+            finally:
+                c.close()
+            return {"results": result_rows(items)}
+
+        return jobs.submit("extract", label, run, reserved=[i.output for i in pending],
+                           results=result_rows(items), **info)
 
     @app.post("/bags/{bag_id}/extract", dependencies=[Depends(same_origin)])
     def run_extract(
@@ -210,45 +253,21 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
     ):
         bag = load_bag(conn, bag_id)
         here = f"/bags/{bag_id}"
-        try:
-            start_ns = extract.parse_bag_time(start, bag["start_ns"]) if start.strip() else None
-            end_ns = extract.parse_bag_time(end, bag["start_ns"]) if end.strip() else None
-        except ValueError as e:
-            return redirect(here, f"invalid time: {e}")
-        if start_ns is not None and end_ns is not None and start_ns > end_ns:
-            return redirect(here, "start is after end")
         if not topic:
             return redirect(here, "select at least one topic")
-        out = Path(output.strip()).expanduser() if output.strip() else extract.default_output_path(Path(bag["path"]))
-        if not out.is_absolute():
+        if output.strip() and not Path(output.strip()).expanduser().is_absolute():
             return redirect(here, "output path must be absolute")
-        if out.exists():
-            return redirect(here, f"output already exists: {out}")
         all_topics = {t["name"] for t in catalog.topics_of(conn, bag_id)}
         include = [] if set(topic) >= all_topics else topic
-
-        def run(j: JobRunner) -> dict:
-            j.update(total=1000, current=str(out))
-
-            def on_progress(frac: float, written: int) -> None:
-                j.update(done=round(frac * 1000))
-                j.set_stats(messages=written)
-                j.check_cancelled()
-
-            c = db.connect(db_path)
-            try:
-                result, new_id = extract.extract_bag(c, dict(bag), out, start_ns, end_ns, include, (), on_progress)
-            finally:
-                c.close()
-            return {"result_bag_id": new_id, "result_path": str(result.path)}
-
-        if not job.start("extract", f"Extract from {bag['name']}", run, bag_id=bag_id):
-            return redirect(here, "another job is already running")
-        return redirect(here)
-
-    @app.get("/jobs", response_class=HTMLResponse)
-    def jobs_page(request: Request):
-        return templates.TemplateResponse(request, "jobs.html", {"job": job.status()})
+        items = extract.plan_batch(
+            conn, [bag], start.strip() or None, end.strip() or None, include=include,
+            output=Path(output.strip()).expanduser() if output.strip() else None,
+            taken=jobs.reserved_outputs(),
+        )
+        if items[0].status == "skipped":
+            return redirect(here, items[0].message)
+        submit_extract(f"Extract from {bag['name']}", items, include, bag_id=bag_id)
+        return redirect("/jobs")
 
     def load_bags(conn: sqlite3.Connection, ids: list[int]) -> list[sqlite3.Row]:
         rows = [catalog.get_bag(conn, i) for i in dict.fromkeys(ids)]
@@ -272,8 +291,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
                 ids,
             ).fetchall()
         return templates.TemplateResponse(request, "extract.html", {
-            "bags": bags, "topics": topics, "job": job.status(), "error": error,
-            "suffix": extract.default_suffix(),
+            "bags": bags, "topics": topics, "error": error, "suffix": extract.default_suffix(),
         })
 
     @app.post("/extract", dependencies=[Depends(same_origin)])
@@ -288,70 +306,44 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         conn: sqlite3.Connection = Depends(get_conn),
     ):
         back = "/extract?" + urlencode({"bag": bag}, doseq=True)
-
-        def fail(message: str) -> RedirectResponse:
-            return RedirectResponse(back + "&" + urlencode({"error": message}), status_code=303)
-
         bags = load_bags(conn, bag)
         if not bags:
             return redirect("/", "no bags selected")
         if not topic:
-            return fail("select at least one topic")
+            return redirect(back, "select at least one topic")
         out_dir = None
         if output_mode == "dir":
             if not output_dir.strip() or not Path(output_dir.strip()).expanduser().is_absolute():
-                return fail("output folder must be an absolute path")
+                return redirect(back, "output folder must be an absolute path")
             out_dir = Path(output_dir.strip()).expanduser()
         suffix = suffix.strip()
         if suffix and ("/" in suffix or suffix.startswith(".")):
-            return fail("suffix must not contain '/' or start with '.'")
+            return redirect(back, "suffix must not contain '/' or start with '.'")
 
         ids = [b["id"] for b in bags]
         all_topics = {r[0] for r in conn.execute(
             f"SELECT DISTINCT name FROM topics WHERE bag_id IN ({','.join('?' * len(ids))})", ids)}
         include = [] if set(topic) >= all_topics else topic
-        items = extract.plan_batch(conn, bags, start.strip() or None, end.strip() or None,
-                                   include=include, output_dir=out_dir, suffix=suffix or None)
-        if not any(i.status == "pending" for i in items):
-            return fail("nothing to extract: " + "; ".join(sorted({i.message for i in items})))
-
-        def run(j: JobRunner) -> dict:
-            n = sum(i.status == "pending" for i in items)
-            j.update(total=1000 * n)
-            j.set_stats(done=0, skipped=sum(i.status == "skipped" for i in items), failed=0, messages=0)
-
-            def on_progress(k, n, item, frac, written):
-                j.update(done=round((k + frac) * 1000), current=f"[{k + 1}/{n}] {item.bag['path']}")
-                j.check_cancelled()
-
-            def on_item(item):
-                j.bump(item.status)
-                j.bump("messages", item.message_count)
-
-            c = db.connect(db_path)
-            try:
-                extract.run_batch(c, items, include, (), on_progress, on_item)
-            finally:
-                c.close()
-                j.update(results=[{
-                    "source": i.bag["path"], "source_id": i.bag["id"], "status": i.status,
-                    "message": i.message, "output": str(i.output), "result_bag_id": i.result_id,
-                } for i in items])
-            return {}
-
-        n = sum(i.status == "pending" for i in items)
-        if not job.start("extract", f"Extract from {n} bag(s)", run,
-                         results=[{"source": i.bag["path"], "source_id": i.bag["id"], "status": i.status,
-                                   "message": i.message, "output": str(i.output), "result_bag_id": None}
-                                  for i in items]):
-            return fail("another job is already running")
+        items = extract.plan_batch(conn, bags, start.strip() or None, end.strip() or None, include=include,
+                                   output_dir=out_dir, suffix=suffix or None, taken=jobs.reserved_outputs())
+        pending = sum(i.status == "pending" for i in items)
+        if not pending:
+            return redirect(back, "nothing to extract: " + "; ".join(sorted({i.message for i in items})))
+        submit_extract(f"Extract from {pending} bag(s)", items, include)
         return redirect("/jobs")
 
     # ------------------------------------------------------------ JSON
 
-    @app.get("/api/job")
-    def api_job_status():
-        return job.status()
+    @app.get("/api/jobs")
+    def api_jobs():
+        return jobs.list()
+
+    @app.get("/api/jobs/{job_id}")
+    def api_job(job_id: int):
+        j = jobs.get(job_id)
+        if j is None:
+            raise HTTPException(404, "job not found")
+        return j
 
     @app.get("/api/bags")
     def api_bags(

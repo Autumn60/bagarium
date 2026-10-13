@@ -97,9 +97,12 @@ Defaults to `~/.local/share/bagarium/bagarium.db`. Override with `--db PATH` or 
 - Detail: metadata, topic list (filterable, with message counts and average rates), tag and note editing,
   and extraction (pick topics and a time range; runs in the background)
 - Extract: batch extraction from the selected bags, with topics shown across all of them
-- Jobs: progress of the running scan / extraction and per-bag results
+- Jobs: scans and extractions started from the UI are queued and run one at a time, in order.
+  The page shows the running job's progress, the queue (remove queued jobs, cancel the running one)
+  and finished jobs with per-bag results. Outputs of queued extractions are reserved, so jobs queued
+  with the same names do not collide. The queue lives in the server process and is lost on restart.
 - Scan: register / remove folders and scan them in the background with a progress bar (cancellable)
-- JSON API: `/api/bags`, `/api/bags/{id}`, `/api/job` (spec at `/api/docs`)
+- JSON API: `/api/bags`, `/api/bags/{id}`, `/api/jobs`, `/api/jobs/{id}` (spec at `/api/docs`)
 
 The server listens on `127.0.0.1` only by default. There is no authentication, so be careful when exposing it with `--host 0.0.0.0`.
 
