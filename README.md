@@ -169,9 +169,17 @@ bagarium serve
 - Thumbnails and preview videos are cached in `~/.cache/bagarium` (`XDG_CACHE_HOME`) and remade when the
   bag changes; they can be deleted at any time.
 
-### Catalog database location
+### Where files are kept
 
-Defaults to `~/.local/share/bagarium/bagarium.db`. Override with `--db PATH` or the `BAGARIUM_DB` environment variable.
+| What | Default | Change with |
+|---|---|---|
+| Catalog (bags, tags, notes, roots, cached tracks) | `~/.local/share/bagarium/bagarium.db` | `BAGARIUM_DB` / `--db` |
+| Thumbnails and preview videos (safe to delete) | `~/.cache/bagarium/` | `BAGARIUM_CACHE_DIR` |
+| Both, in one directory | — | `BAGARIUM_HOME` / `--home` → `<home>/bagarium.db`, `<home>/cache/` |
+
+A specific setting wins over `BAGARIUM_HOME`, which wins over the defaults (which follow
+`XDG_DATA_HOME` / `XDG_CACHE_HOME`). `bagarium info` shows the locations in use and their size.
+Existing files are not moved when a setting changes; copy them to the new place first to keep them.
 
 ## Web UI
 

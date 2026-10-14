@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -33,12 +35,21 @@ pass_ctx = click.make_pass_decorator(Ctx)
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option("--home", type=click.Path(file_okay=False, path_type=Path),
+              help="Keep the catalog and caches in this directory (same as BAGARIUM_HOME).")
 @click.option("--db", "db_path", envvar="BAGARIUM_DB", type=click.Path(dir_okay=False),
-              help=f"Catalog database (default: {db.default_db_path()}).")
+              help="Catalog database (BAGARIUM_DB; default: BAGARIUM_HOME/bagarium.db or "
+                   "~/.local/share/bagarium/bagarium.db).")
 @click.version_option(__version__)
 @click.pass_context
-def main(ctx: click.Context, db_path: str | None) -> None:
-    """bagarium - a local catalog for ROS 2 bags (mcap / sqlite3)."""
+def main(ctx: click.Context, home: Path | None, db_path: str | None) -> None:
+    """bagarium - a local catalog for ROS 2 bags (mcap / sqlite3).
+
+    See `bagarium info` for where the catalog and caches are kept.
+    """
+    if home is not None:
+        # through the environment, so the web server and worker processes follow it too
+        os.environ["BAGARIUM_HOME"] = str(home.expanduser().resolve())
     ctx.obj = Ctx(db_path)
 
 
@@ -608,6 +619,36 @@ def _video_plan(c: Ctx, r, topics, tile, output, output_dir, start, end, taken: 
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
     return r, chosen, out, start_ns, end_ns
+
+
+@main.command()
+@pass_ctx
+def info(c: Ctx) -> None:
+    """Show where the catalog and caches are kept, and how much space they use."""
+    from . import paths
+    from .web.jobs import default_lanes
+
+    def dir_size(path: Path) -> int:
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) if path.exists() else 0
+
+    db_file = Path(c.db_path).expanduser() if c.db_path else paths.db_path()
+    db_size = sum(p.stat().st_size for p in (db_file, Path(f"{db_file}-wal"), Path(f"{db_file}-shm")) if p.exists())
+    cache = paths.cache_dir()
+    counts = c.conn.execute("SELECT COUNT(*), SUM(missing), SUM(error IS NOT NULL OR problem IS NOT NULL) FROM bags").fetchone()
+    roots = c.conn.execute("SELECT COUNT(*) FROM roots").fetchone()[0]
+    ffmpeg = shutil.which("ffmpeg")
+    rows = [
+        ("version", __version__),
+        ("catalog", f"{db_file}  ({fmt.size(db_size)}; from {'--db' if c.db_path else paths.source('db')})"),
+        ("bags", f"{counts[0]} ({counts[1] or 0} missing, {counts[2] or 0} broken) in {roots} root(s)"),
+        ("cache", f"{cache}  (from {paths.source('cache')})"),
+        ("  previews", fmt.size(dir_size(cache / "videos"))),
+        ("  thumbnails", fmt.size(dir_size(cache / "thumbnails"))),
+        ("ffmpeg", ffmpeg or "not found (needed for preview videos)"),
+        ("video jobs", f"{default_lanes()['video']} at a time (BAGARIUM_VIDEO_WORKERS)"),
+    ]
+    for key, value in rows:
+        click.echo(f"{key:>12}  {value}")
 
 
 @main.command()

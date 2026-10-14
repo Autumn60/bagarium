@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from pathlib import Path
+
+from . import paths
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bags (
@@ -71,11 +72,8 @@ CREATE TABLE IF NOT EXISTS bag_tags (
 
 
 def default_db_path() -> Path:
-    env = os.environ.get("BAGARIUM_DB")
-    if env:
-        return Path(env).expanduser()
-    base = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
-    return Path(base) / "bagarium" / "bagarium.db"
+    """See ``paths``: BAGARIUM_DB, then BAGARIUM_HOME, then the XDG data directory."""
+    return paths.db_path()
 
 
 def connect(path: str | Path | None = None) -> sqlite3.Connection:

@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
-from . import bagreader
+from . import bagreader, paths
 
 COMPRESSED = "sensor_msgs/msg/CompressedImage"
 RAW = "sensor_msgs/msg/Image"
@@ -398,8 +398,8 @@ def make_tiled_video(
 
 
 def cache_dir() -> Path:
-    base = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
-    return Path(base) / "bagarium"
+    """See ``paths``: BAGARIUM_CACHE_DIR, then BAGARIUM_HOME/cache, then the XDG cache directory."""
+    return paths.cache_dir()
 
 
 ALL_CAMERAS = "*"  # pseudo topic for the tiled preview of every camera
